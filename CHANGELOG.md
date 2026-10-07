@@ -13,7 +13,7 @@
   只读机器体检 `run/env-check-v1.sh`、面板命令行驱动 `tools/panel/`、官方尺子测速封装 `tools/bench-official-v1.sh`、
   出厂自检 `tools/lint-package-v1.sh`、前后对照实测 `docs/`。
 - 新增一层**我们自维护**的 FlashInfer PCIe-IPC 回填（6 个逐字文件＋3 处纯追加，不动 vLLM 树、不升级 FlashInfer）。
-  官方产物点不亮这个后端；收益与撤除方式见 README §3 与 §6。
+  官方产物点不亮这个后端；收益与撤除方式见 README §3 与 §5。
 
 **已知限制**
 

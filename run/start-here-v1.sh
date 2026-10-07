@@ -150,20 +150,19 @@ elif ls "$MODELS"/*/config.json >/dev/null 2>&1; then
 else bad "在 $MODELS 及其一级子目录里都没找到 config.json —— 权重没就位，后面全部免谈"; fi
 
 if [ -s "$ENVFILE" ]; then
-  # 只认"变量名里带密钥类字样"的行（锚到 = 号前的名字），不按值匹配：
-  # 原写法 `.*TOKEN=` 之类会被 `VLLM_SOMETHING=autoTOKEN=x` 这种值命中、也会被正常变量名误伤。
-  if grep -qE '^[A-Za-z0-9_]*(API_KEY|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|CREDENTIAL)=' "$ENVFILE"; then
-    bad "env-file 里有密钥类变量（名字含 API_KEY/TOKEN/SECRET/PASSWORD/PRIVATE_KEY/CREDENTIAL），先剔除"
-    echo "        命中项：$(grep -oE '^[A-Za-z0-9_]*(API_KEY|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|CREDENTIAL)' "$ENVFILE" | tr '\n' ' ')"
+  # 官方基线就是把引擎的 VLLM_API_KEY 放在 --env-file 里（umask 077 生成 secrets/api.env），
+  # 所以这里**不拦密钥类变量**——拦它就等于否掉官方流程。要拦的是"权限敞开"与"值被打印出来"。
+  perm=$(stat -c '%a' "$ENVFILE" 2>/dev/null || stat -f '%Lp' "$ENVFILE" 2>/dev/null || echo 未知)
+  nsec=$(grep -cE '^[A-Za-z0-9_]*(API_KEY|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|CREDENTIAL)=' "$ENVFILE")
+  if [ "$perm" != "600" ] && [ "$perm" != "400" ]; then
+    bad "env-file 权限是 $perm，期望 600（里面通常有 VLLM_API_KEY）：chmod 600 $ENVFILE"
   else
-    perm=$(stat -c '%a' "$ENVFILE" 2>/dev/null || stat -f '%Lp' "$ENVFILE" 2>/dev/null || echo 未知)
-    good "env-file $(grep -c '^' "$ENVFILE") 条、权限 $perm、无密钥类"
+    good "env-file $(grep -c '^' "$ENVFILE") 条、权限 $perm（其中密钥类 $nsec 条，值不回显）"
     root=$(grep -E '^SM75_CONSOLE_ROOT=' "$ENVFILE" | tail -1 | cut -d= -f2-)
     if [ -z "$root" ]; then
-      # 没写不等于没事：镜像自带默认是 /data，那在容器可写层里，重建就把 profiles.json 与登录 key 一起丢掉
-      bad "env-file 里没有 SM75_CONSOLE_ROOT ⇒ 面板会退回镜像默认的 /data（容器可写层，重建即丢）。补一行 SM75_CONSOLE_ROOT=/console-data"
+      bad "env-file 里没有 SM75_CONSOLE_ROOT ⇒ 面板会用镜像内置的 /data，而本脚本把 $DATA 绑到 /console-data ⇒ 档与登录 key 落在没被 bind 的路径上。补一行 SM75_CONSOLE_ROOT=/console-data"
     elif [ "$root" != "/console-data" ]; then
-      bad "env-file 里 SM75_CONSOLE_ROOT=$root，不是 /console-data（＝$DATA 那条 bind 的目标）⇒ 档与登录 key 不落宿主"
+      bad "env-file 里 SM75_CONSOLE_ROOT=$root，与本脚本的 bind 目标 /console-data 不一致 ⇒ 面板数据不落宿主。要么把它改成 /console-data，要么按官方布局把 $DATA 绑到 /data 并保留这个值（两处必须一致）"
     else good "env-file 里 SM75_CONSOLE_ROOT=/console-data（与 bind 目标一致）"; fi
   fi
 else
