@@ -21,8 +21,8 @@ case "${1:-}" in
   *) M="$1" ;;
 esac
 M=${M:-${MODELS:-/var/lib/sm75-models/Flash-Next-FP8PLE}}
-# 清单路径必须**在 cd 之前**定成绝对路径：上一版默认 tools/flash-next-tested.sha256 是相对包根的，
-# 脚本中途 cd 到权重目录后再把相对路径交给 sha256sum -c，就变成"从权重目录里找 tools/…"＝必然读不到。
+# 清单路径必须在 cd 之前定成绝对路径：脚本中途会 cd 到权重目录，
+# 那时再把相对路径交给 sha256sum -c 就等于"去权重目录里找 tools/…"，必然读不到。
 MAN=${MANIFEST:-$D/tools/flash-next-tested.sha256}
 case "$MAN" in
   /*) : ;;

@@ -23,9 +23,9 @@ IMG=${IMG:-vllm-sm75:v0.1.7-ultra-beta-to20s-pcieipc}
 DATA=${DATA:-/var/lib/sm75-console}                       # 面板数据目录（宿主侧，容器内是 /console-data）
 MODELS=${MODELS:-/var/lib/sm75-models/Flash-Next-FP8PLE}  # 权重目录，只读挂成 /models
 CACHE=${CACHE:-/var/lib/sm75-cache}                       # 四条 JIT/编译缓存的宿主根
-# NVAPI 默认吃包内那份（文件天然在位、sha 门现成能过）。上一版默认写 $DATA/nvapi/... 而没人把文件放到那儿，
-# 照 README 粘命令的人第一步就撞 BLOCK——而拷文件算写操作，门禁前又不能做，于是成了死结。
-# 想用自己从驱动里取的那份，就显式 NVAPI=/你的路径；不用 P-State 就 NVAPI=none。
+# NVAPI 默认用包内这一份：文件天然在位、sha 门现成能过。
+# （指到 $DATA 下那种写法会卡死人：没人先把文件拷过去，而拷文件算写操作、门禁之前又不能做。）
+# 用自己从驱动里取的那份就显式 NVAPI=/你的路径；不带 P-State 就 NVAPI=none。
 NVAPI=${NVAPI:-$P/docker/libnvidia-api.so.1}
 ENVFILE=${ENVFILE:-$DATA/console.env}                     # 有则用它；没有则用 BOOTSTRAP_ENV
 BIND_HOST=${BIND_HOST:-127.0.0.1}                         # 端口默认只绑回环；要局域网访问显式改成 0.0.0.0 并自行加鉴权
@@ -39,7 +39,7 @@ NVAPI_SHA=4a199f9b259a1098ab9c01d31c67f882a2531a0fbb9c3595ad3d016c7d131d8c
 # 最小 env 集（没有 console.env 时用）。值来自 2026-10-07 在役容器实读，不是抄文档：
 #   镜像自己已带 SM75_EDITION/NCCL_P2P_LEVEL/VLLM_FIREFLY/NVIDIA_VISIBLE_DEVICES，这里只补面板行为项。
 # SM75_CONSOLE_ROOT 必须是 /console-data（= bind 目标）。写成镜像默认的 /data 或别的路径，
-# profiles.json 与登录 key 就落在容器可写层，重建即丢——这是上一版被抓出来的值错。
+# profiles.json 与登录 key 就会落在容器可写层里，重建容器即丢。
 BOOTSTRAP_DEFAULT=(
   SM75_EDITION=ultra
   SM75_SINGLE_CONTAINER=1
@@ -245,7 +245,7 @@ if [ "$NVAPI" != "none" ]; then
   VOL+=(--volume "$NVAPI:/usr/local/nvidia/lib64/libnvidia-api.so.1:ro")
 fi
 # 镜像的 ENTRYPOINT 已经是 "python3 /opt/vllm-sm75/runtime-entrypoint.py"、CMD 为空，
-# 所以这里**只传镜像名**。上一版把那两句当命令再传一遍，等于把它们当 vllm 参数吃掉了。
+# 所以这里**只传镜像名**：再把那两句当命令传一遍，它们就会被当成 vllm 的参数吃掉。
 CMD=(docker run -d --name "$NAME" --gpus all
      --memory "$MEM_LIMIT" --memory-swap "$MEM_LIMIT" --shm-size "$SHM_SIZE"
      --restart "$RESTART" --network bridge
