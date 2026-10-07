@@ -76,7 +76,7 @@ if [ -f "$MODELS/config.json" ]; then
   # 口径（2026-10-07 在官方 tested 修订 ef55414 的目录里实数）：
   #   15 张主分片 + 10 张 plefp8 + 9 项其它（根层 5 个 json/jinja + runtime/mtp-int4-g32/ 下 4 项）= 清单 34 项。
   #   文件名里的 -of-00017 是官方编号；这一修订在场的是 15 张，编号 00002 与 00016 本来就不在里面，
-  #   不是"缺件"。上一版按"25 主分片"判，是拿错了 27B 那条线的账。
+  #   不是缺件，别按"25 张主分片"去判（那是另一条线的账）。
   nm=$(ls "$MODELS"/model-[0-9]*-of-*.safetensors 2>/dev/null | wc -l | tr -dc '0-9')
   np=$(ls "$MODELS"/model-plefp8-*.safetensors 2>/dev/null | wc -l | tr -dc '0-9')
   [ "${nm:-0}" -ge 15 ] && p "主分片 $nm 张（官方 tested 修订在场 15 张，清单里没有 00002/00016）" \
