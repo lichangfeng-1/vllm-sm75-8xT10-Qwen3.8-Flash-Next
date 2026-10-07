@@ -14,7 +14,16 @@ const BASE = process.env.CONSOLE_BASE || 'http://127.0.0.1:1615';
 const MODELS = process.env.BENCH_MODEL_DIR || '/models';
 const TEMPLATE = process.env.BENCH_TEMPLATE || 'flash-next-tp8-256k-nomtp';
 const CACHE_ROOT = process.env.BENCH_CACHE_ROOT || '/root/.cache/sm75-017';
-const SECRET_KEYS = /^(vllm_api_key|key|token|authorization|password|secret|sm75_bench_key|api[-_]key)$/i;
+// 名字命中一律按"包含"判：锚定全匹配会漏掉 apiKey / OPENAI_API_KEY / HF_TOKEN 这类写法，
+// 漏一次就是把真值打进 stdout。宁可多遮（值从不参与判据），不可少遮。
+const SECRET_NAME = /key|token|secret|password|passwd|credential|authorization|api[-_]?key|access[-_]?tok/i;
+// 值形状兜底：40+ 位 base64url 或 32+ 位十六进制，一律当密钥
+const SECRET_VALUE = /^[A-Za-z0-9_+/-]{40,}={0,2}$|^[0-9a-fA-F]{32,}$/;
+const SECRET_ARG = /^-{1,2}(api[-_]?key|token|secret|password|credential)$/i;
+
+function looksSecret(v) { return typeof v === 'string' && SECRET_VALUE.test(v); }
+// "keys"/"env_keys" 这类字段装的是**变量名清单**不是值，遮掉就看不见档里有哪些 env 了
+function isNameList(name) { return /(^|[_-])keys$/i.test(name); }
 
 function readToken() {
   // token 只用于请求头，绝不落日志
@@ -55,15 +64,15 @@ function request(method, path, body) {
 }
 
 function mask(value, name = '') {
-  if (SECRET_KEYS.test(name)) return '***';
+  if (SECRET_NAME.test(name) && !isNameList(name)) return '***';
   if (Array.isArray(value)) return value.map((v) => mask(v, name));
   if (value && typeof value === 'object') {
     const out = {};
     for (const [k, v] of Object.entries(value)) out[k] = mask(v, k);
     return out;
   }
-  // 兜底：43 位 base64url 形态的密钥串
-  if (typeof value === 'string' && /^[A-Za-z0-9_-]{40,}$/.test(value) && /key|token|secret/i.test(name)) return '***';
+  // 兜底：名字不认识的也按值形状遮一次（名字清单除外）
+  if (looksSecret(value) && !isNameList(name)) return '***';
   return value;
 }
 
@@ -165,8 +174,17 @@ function engineEnv(pattern) {
   hits.sort((a, b) => b.cmd.length - a.cmd.length);
   const chosen = hits.slice(0, 1);
   for (const h of chosen) {
-    console.log('=== PID ' + h.pid + ' ARGV (one per line)');
-    fs.readFileSync(`/proc/${h.pid}/cmdline`, 'utf8').split('\0').filter(Boolean).forEach((a) => console.log(a));
+    console.log('=== PID ' + h.pid + ' ARGV (one per line, secret-looking values masked)');
+    let prev = '';
+    fs.readFileSync(`/proc/${h.pid}/cmdline`, 'utf8').split('\0').filter(Boolean).forEach((a) => {
+      const eq = a.indexOf('=');
+      // 三种形态：上一个 flag 是 --api-key 之类 ⇒ 这一位是取值；--api-key=值 ⇒ 就地遮；值本身像密钥 ⇒ 兜底遮
+      if (SECRET_ARG.test(prev)) console.log('***');
+      else if (a.startsWith('-') && eq > 0 && SECRET_NAME.test(a.slice(0, eq))) console.log(a.slice(0, eq) + '=***');
+      else if (looksSecret(a)) console.log('***');
+      else console.log(a);
+      prev = a;
+    });
     let env = [];
     try { env = fs.readFileSync(`/proc/${h.pid}/environ`, 'utf8').split('\0').filter(Boolean); } catch (_) {}
     console.log('=== PID ' + h.pid + ' ENV (sorted, secrets masked)');
@@ -174,7 +192,7 @@ function engineEnv(pattern) {
       const i = line.indexOf('=');
       const k = i < 0 ? line : line.slice(0, i);
       const v = i < 0 ? '' : line.slice(i + 1);
-      console.log(k + '=' + (SECRET_KEYS.test(k) ? '***' : v));
+      console.log(k + '=' + ((SECRET_NAME.test(k) && !isNameList(k)) || looksSecret(v) ? '***' : v));
     });
   }
   console.log('ENGINE_PROCESS_COUNT ' + hits.length);

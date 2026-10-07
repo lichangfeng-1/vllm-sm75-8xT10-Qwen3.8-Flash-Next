@@ -1,5 +1,5 @@
 #!/bin/bash
-# gen-console-env-v1.sh —— 一次性：把在役 console 容器的 env 导出成宿主 env-file（供 run-console-pcieipc 用）
+# gen-console-env-v1.sh —— 把在役 console 容器的 env 导出成宿主 env-file（供 run/start-here-v1.sh 的 ENVFILE 用）
 #
 # 为什么要这一步：生产启动脚本不能依赖"去 inspect 某个参照容器"（参照容器哪天被删脚本就废了）。
 # env 落成一个 600 的宿主文件，脚本自给自足。
@@ -14,8 +14,8 @@ SRC=${1:-sm75-017-console}                       # 要导出的在役容器名
 OUT=${OUT:-${DATA:-/var/lib/sm75-console}/console.env}   # 落地路径，OUT= 或 DATA= 覆盖
 
 docker inspect "$SRC" >/dev/null 2>&1 || { echo "BLOCK 容器读不到 $SRC"; exit 2; }
-mkdir -p "$(dirname "$OUT")" || exit 3
 
+# 先扫密钥、再动文件系统：原来 mkdir 写在扫描之前，等于"承诺拒绝落盘却先把目录建出来了"。
 echo "=== 1) 密钥扫描 ==="
 secret=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$SRC" \
          | cut -d= -f1 | grep -iE "KEY|TOKEN|SECRET|PASS|AUTH" | tr '\n' ' ')
@@ -27,6 +27,7 @@ fi
 echo "  PASS 无密钥类变量"
 
 echo "=== 2) 导出 ==="
+mkdir -p "$(dirname "$OUT")" || exit 3
 if [ -f "$OUT" ]; then
   BAK="$OUT.bak-$(date +%Y%m%d-%H%M%S)"
   cp -p "$OUT" "$BAK" && echo "  已备份旧文件 -> $BAK"

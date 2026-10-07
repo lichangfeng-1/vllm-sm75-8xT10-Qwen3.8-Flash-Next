@@ -37,8 +37,9 @@ EXPECT_N=${EXPECT_N:-34}
 [ -s "$MAN" ] || { echo "EMPTY_MANIFEST $MAN"; exit 1; }
 
 # 清单形状先验：每行必须是 "<64 位十六进制>  <相对路径>"（两个空格），路径不得是绝对路径或含 ..
-badfmt=$(awk 'NF<2 || $1 !~ /^[0-9a-fA-F]{64}$/ {print NR": "$0}' "$MAN" | head -4)
-[ -z "$badfmt" ] || { echo "MANIFEST_FORMAT_BAD 以下行不像 sha256sum 清单：$badfmt"; exit 2; }
+# 只列前 4 行会把"第 5 到第 N 行也坏了"隐掉 ⇒ 一并给总数
+badfmt=$(awk 'NF<2 || $1 !~ /^[0-9a-fA-F]{64}$/ {c++; if (c<=4) printf "  %s", NR": "$0} END{printf "TOTAL=%d", c+0}' "$MAN")
+case "$badfmt" in TOTAL=0) : ;; *) echo "MANIFEST_FORMAT_BAD 有不像 sha256sum 清单的行：$badfmt"; exit 2 ;; esac
 badpath=""
 while IFS= read -r line; do
   f=$(printf '%s' "$line" | sed -E 's/^[0-9a-fA-F]{64}[ \t]+//; s/^\*//')

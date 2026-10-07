@@ -16,6 +16,7 @@ set -u
 CONTAINER=${CONTAINER:-sm75-017-console}
 LABEL=${LABEL:?必须给 LABEL（官方尺子拒绝覆盖同名标签，正好当防重跑保险）}
 SIZES=${SIZES:-8192,130560,261632}
+MODEL_PATH=${MODEL_PATH:-/models}          # 挂模型目录本身＝/models；挂父目录就指到 /models/<子目录>
 OUT_TOKENS=${OUT_TOKENS:-512}
 WARMUPS=${WARMUPS:-2}
 REPEATS=${REPEATS:-7}
@@ -53,9 +54,12 @@ docker exec "$CONTAINER" test -f "$dep" || { echo "BLOCK 缺配套 $dep（尺子
 echo "  配套=$dep 在位"
 
 echo "=== 2) 取密钥（只报长度，绝不打印值）==="
-KEY=$(docker exec "$CONTAINER" sh -c 'cat /console-data/engine-key.current 2>/dev/null || cat /console-data/key 2>/dev/null' | tr -d '\r\n')
+# 只读引擎自己的密钥文件；**绝不拿 /console-data/key（面板登录 token）当引擎 api-key 用**——
+# 那是跨信任边界复用：一次 401 的排查日志就把面板凭据留在了测速侧。
+KEY=$(docker exec "$CONTAINER" sh -c 'cat /console-data/engine-key.current 2>/dev/null' | tr -d '\r\n')
 if [ -z "$KEY" ]; then
-  echo "  WARN 读不到引擎密钥 ⇒ 本次不发 Authorization 头（引擎未配 api-key 时本来就不需要，不影响吞吐口径）"
+  echo "  WARN 读不到 /console-data/engine-key.current ⇒ 本次不发 Authorization 头"
+  echo "       引擎若配了 --api-key，请把**引擎那个**密钥（不是面板登录 token）放成 engine-key.current 并 chmod 600 再测"
 else
   echo "  引擎密钥长度=${#KEY}（值不外流：走 stdin 进容器，不出现在宿主 ps 里）"
 fi
@@ -71,7 +75,7 @@ if [ -n "$KEY" ]; then
     -e LABEL="$LABEL" -e VLLM_BENCH_ROOT="$ROOT" -e VLLM_TOOL="$TOOLFOUND" \
     -e VLLM_BASE_URL="$MODEL" -e VLLM_MODEL="$MODEL_NAME" -e PYTHONIOENCODING=utf-8 \
     bash -c 'read -r K; if [ -n "$K" ]; then export VLLM_API_KEY="$K"; fi; exec python3 "$VLLM_TOOL" "$@"' \
-    bench --model-path /models --expect-mtp off --label "$LABEL" \
+    bench --model-path "$MODEL_PATH" --expect-mtp off --label "$LABEL" \
     --sizes "$SIZES" --warmups "$WARMUPS" --repeats "$REPEATS" --long-repeats "$LONG_REPEATS" \
     --output "$OUT_TOKENS" --mixed > "$OUTDIR/$LABEL.out" 2>&1
 else
@@ -79,7 +83,7 @@ else
     -e LABEL="$LABEL" -e VLLM_BENCH_ROOT="$ROOT" \
     -e VLLM_BASE_URL="$MODEL" -e VLLM_MODEL="$MODEL_NAME" -e PYTHONIOENCODING=utf-8 \
     python3 "$TOOLFOUND" \
-    --model-path /models --expect-mtp off --label "$LABEL" \
+    --model-path "$MODEL_PATH" --expect-mtp off --label "$LABEL" \
     --sizes "$SIZES" --warmups "$WARMUPS" --repeats "$REPEATS" --long-repeats "$LONG_REPEATS" \
     --output "$OUT_TOKENS" --mixed > "$OUTDIR/$LABEL.out" 2>&1
 fi
@@ -92,7 +96,7 @@ python3 - "$OUTDIR" "$LABEL" <<'PY'
 import glob, json, os, statistics, sys
 outd, label = sys.argv[1], sys.argv[2]
 txt = open(os.path.join(outd, label + ".out"), encoding="utf-8", errors="replace").read()
-rows, passed = [], None
+rows, passed, bad_cases = [], None, []
 for line in txt.splitlines():
     line = line.strip()
     if not line.startswith("{"):
@@ -121,15 +125,25 @@ for case in sorted({r["case"] for r in rows}):
     cached = {r.get("cached_tokens") for r in sel}
     pre = {r.get("preemptions") for r in sel}
     drf = {r.get("drafted") for r in sel}
-    flag = ""
-    if cached != {0} or pre != {0.0} or (drf - {0}):
+    dirty = cached != {0} or pre != {0.0} or bool(drf - {0})
+    if dirty:
         flag = "   <== 口径异常：命中缓存/被抢占/有投机，不可与本文数字比较"
+        bad_cases.append(case)
+    else:
+        flag = ""
     print("  %-8s n=%d decode 中位 %.2f 区间 %.2f-%.2f | prefill 中位 %.2f | ITL %.2f ms%s" % (
         case, len(sel), statistics.median(d), min(d), max(d), statistics.median(p),
         1000.0 / statistics.median(d), flag))
 print("  warmup 行=%d（已排除）" % len(bad))
+if bad_cases:
+    # 只往行尾拼一句"口径异常"却不改退出码，等于把不可比的数当可比基线发出去——脚本头部承诺的是
+    # "任一不满足就报 BENCH_NOT_COMPARABLE"，所以这里必须非零退出。
+    print("  BENCH_NOT_COMPARABLE 口径异常档: %s（命中缓存/被抢占/有投机，别引用这轮数字）" % ",".join(bad_cases))
+    sys.exit(8)
 print("BENCH_OK")
 PY
 rc2=$?
 echo "BENCH_DONE rc=$rc judge=$rc2 原始输出=$OUTDIR/$LABEL.out"
-exit $((rc + rc2))
+# 原来是 exit $((rc + rc2))：两个码相加正好凑成 256 的倍数时 shell 会归零 ⇒ "失败被报成成功"
+if [ "$rc" = "0" ] && [ "$rc2" = "0" ]; then exit 0; fi
+exit 1

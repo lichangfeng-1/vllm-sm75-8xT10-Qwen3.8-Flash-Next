@@ -10,7 +10,17 @@ const http = require('http');
 const fs = require('fs');
 
 const BASE = process.env.CONSOLE_BASE || 'http://127.0.0.1:1615';
-const SECRET = /key|token|secret|password/i;
+// 按"包含"判（锚定全匹配会漏 apiKey / OPENAI_API_KEY 这类写法），再加值形状兜底与 flag 取值位判定
+const SECRET = /key|token|secret|password|passwd|credential|authorization|api[-_]?key/i;
+const SECRET_VALUE = /^[A-Za-z0-9_+/-]{40,}={0,2}$|^[0-9a-fA-F]{32,}$/;
+const SECRET_ARG = /^-{1,2}(api[-_]?key|token|secret|password|credential)$/i;
+function looksSecret(v) { return typeof v === 'string' && SECRET_VALUE.test(v); }
+// 打印某个 argv 位：它自己像密钥、或它前面的 flag 是密钥类，都遮
+function showArg(args, i) {
+  const v = String((args || [])[i]);
+  if (SECRET_ARG.test(String((args || [])[i - 1] || '')) || looksSecret(v)) return '***';
+  return v;
+}
 
 function req(method, path, body) {
   return new Promise((resolve, reject) => {
@@ -58,8 +68,10 @@ function otherDiff(a, b) {
 }
 function shown(p) {
   const e = {};
-  for (const [k, v] of Object.entries(p.env || {})) e[k] = SECRET.test(k) ? '***' : v;
-  return { args: p.args, env: e };
+  const a = ((p || {}).args || []).map((v, i, arr) =>
+    (SECRET_ARG.test(String(arr[i - 1] || '')) || looksSecret(v)) ? '***' : v);
+  for (const [k, v] of Object.entries(p.env || {})) e[k] = SECRET.test(k) || looksSecret(v) ? '***' : v;
+  return { args: a, env: e };
 }
 
 (async () => {
@@ -92,14 +104,17 @@ function shown(p) {
     const i = (next.args || []).indexOf(k1);
     if (i < 0) { console.log('ABORT setarg 只允许改已有参数，模板里没有 ' + k1); process.exit(5); }
     if (i + 1 >= next.args.length) { console.log('ABORT ' + k1 + ' 后面没有值，不敢当开关处理'); process.exit(6); }
-    console.log('OLD_ARG[' + (i + 1) + ']=' + next.args[i + 1]);
+    console.log('OLD_ARG[' + (i + 1) + ']=' + showArg(next.args, i + 1));
     next.args[i + 1] = k2;
     expected = ['args[' + (i + 1) + ']'];
   } else { console.log('UNKNOWN_MODE ' + mode); process.exit(2); }
 
   const post = await req('POST', '/console-api/profiles', next);
   if (post.status !== 200) {
-    console.log('POST_FAIL status=' + post.status + ' body=' + JSON.stringify(post.body).slice(0, 400));
+    // 服务端 body 里可能回显 env/参数，走一遍脱敏再打印
+    const pb = post.body && typeof post.body === 'object' && !Array.isArray(post.body)
+      ? { args: post.body.args, env: post.body.env || post.body } : { args: [], env: {} };
+    console.log('POST_FAIL status=' + post.status + ' body=' + JSON.stringify(shown(pb)).slice(0, 400));
     process.exit(7);
   }
   const after = ((await req('GET', '/console-api/profiles')).body || []).find((x) => x.id === id);
@@ -109,8 +124,8 @@ function shown(p) {
   const unexpected = got.filter((d) => !expected.includes(d));
   const missing = expected.filter((e) => !got.includes(e));
   console.log('EXPECTED=' + expected.join(',') + '  GOT=' + (got.join(',') || 'none'));
-  if (mode === 'setarg') console.log('NEW_ARG=' + (after.args[(snapshot.args || []).indexOf(k1) + 1]));
-  if (mode !== 'setarg') console.log('NOW_ENV=' + (SECRET.test(k1) ? '***' : String((after.env || {})[k1])));
+  if (mode === 'setarg') console.log('NEW_ARG=' + showArg(after.args, (snapshot.args || []).indexOf(k1) + 1));
+  if (mode !== 'setarg') { const nv = String((after.env || {})[k1]); console.log('NOW_ENV=' + (SECRET.test(k1) || looksSecret(nv) ? '***' : nv)); }
 
   if (unexpected.length || missing.length) {
     console.log('UNEXPECTED=' + unexpected.join(',') + ' MISSING=' + missing.join(','));

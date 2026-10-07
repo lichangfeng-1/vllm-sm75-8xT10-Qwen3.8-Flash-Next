@@ -22,6 +22,26 @@
 | B12 | `SKIP_NVAPI=1` 文档里是退路、`build.sh` 里没实现 | 实现真开关＋讲清 0.1.7 形态（这库本来不进镜像）；退路要**三处一起改**（build SKIP_NVAPI / start-here NVAPI=none / profile power.mode=sleep）；`NVAPI-获取说明` 同步重写 |
 | B13 | 引擎端口默认发 `0.0.0.0` 且档内无 api-key | 默认 `BIND_HOST=127.0.0.1`，端口对外默认回落到基线 8000（18001 进漂移项）；README/部署文档写明"要局域网访问请显式改并自行加鉴权" |
 
+### 三轮隔离审查之后的追加修复（同一批发布前，每条尽量带反向对照）
+
+| 提出方 | 症状（别人照包跑会怎样） | 修法 |
+|---|---|---|
+| R1 | 自检脚本的"本机路径"门里，盘符分支经 bash 递给 grep 后反斜杠把竖线转义成了**字面竖线** ⇒ 那条分支永不为真，盘符路径整个失明 | 反斜杠改写成字符类；反向对照：盘符样本旧写法放行、新写法命中。这道门修好后第一件事就是抓到我自己写在注释里的样例路径（它本就该抓这个） |
+| R1 | `bench-official` 抓到 `cached_tokens/preemptions/drafted` 异常时只往行尾拼一句提示，照样打 `BENCH_OK` 并退 0 ⇒ 把不可比的数当可比基线发出去 | 记 `bad_cases` ⇒ 末行改打 `BENCH_NOT_COMPARABLE` 并 `exit 8`；`exit $((rc+rc2))` 换成"两个都 0 才算过"（两码相加凑成 256 倍数会被 shell 归零） |
+| R1 | README 教的 `--dry-run` 在"面板正在跑"的机器上必然 BLOCK（端口门按 bad 判），预演根本跑不动 | 端口门与同名容器一样在 dry-run 降为 WARN（它们拦的都是"真起"那一步），真跑形态仍 BLOCK＋退出 4 |
+| R1 | B2 的保护只覆盖 `BOOTSTRAP` 分支：走 `--env-file` 时不验 `SM75_CONSOLE_ROOT`，而镜像默认是 `/data`（容器可写层，重建即丢） | env-file 分支同判（缺这个键或值不是 `/console-data` ⇒ BLOCK）；终态自检再加一条"`/console-data` 在挂载表里"（看 `docker inspect .Mounts`，不看"我 --volume 过"） |
+| R1 | `NVAPI=none` 时默认 env 集仍发 `POWER_MODE=pstate`＋`PSTATE_*`，自己跟自己矛盾（面板会拒绝启引擎） | `NVAPI=none` 时默认集自动换成 `POWER_MODE=sleep` 并去掉 `PSTATE_*`，不留"记得手工改"的坑 |
+| R1 | 照 README 粘第二步必撞门：`NVAPI` 默认指 `$DATA/nvapi/…`，可没人把包内文件拷到那儿，而 `$DATA` 又要门禁通过后才建 ⇒ 死结 | 默认改成包内 `docker/libnvidia-api.so.1`（sha 门现成能过）；用自己从驱动取的那份再显式 `NVAPI=` |
+| R1 | `BOOTSTRAP_ENV=""`（或只有分号）切出空数组 ⇒ 一个 `-e` 都不发，其余门禁全绿，正是 B2 的"重建即丢"形状 | 空集当错误：BLOCK 并提示 unset 用默认集。（审查员判为 `set -u` 崩溃，本机 bash 5.3 与服务器 bash 5.2 都复现不了崩溃 ⇒ 按其真实性质修） |
+| R1 | `docker run -e KEY=值` 的取值同时进本脚本 stdout 与宿主 `ps`；密钥类变量没人拦 | 最小 env 集的 PASS 行**只报变量名**；名字含 API_KEY/TOKEN/SECRET/PASSWORD/PRIVATE_KEY/CREDENTIAL 直接 BLOCK 并引导改用 `--env-file` |
+| R2 | 测速脚本把**面板登录 token** 当引擎 api-key 发出去（跨信任边界复用） | 只读 `engine-key.current`；取不到就不发 Authorization，并写明"要配的是引擎那个密钥，不是面板 token" |
+| R2 | 随包发的两枚 CLI 脱敏是锚定全匹配 ⇒ `apiKey`/`OPENAI_API_KEY`/`HF_TOKEN` 这类写法漏网；`engineenv` 的 argv 是裸打印（`--api-key` 的值能进 stdout） | 名字改按"包含"判＋值形状兜底；argv 三种形态（`--api-key 值`、`--api-key=值`、值本身像密钥）都遮；`keys`/`env_keys` 这类"变量名清单"字段豁免，否则遮到看不见档里有哪些 env |
+| R1/R3 | 自检脚本 F) 门用 glob：Dockerfile 全改名时循环拿到的是字面量、计数照加 ⇒ 假通过；B) 段没覆盖 `.cjs`；`#!/bin/sh` 脚本只过 `bash -n`（容器里 `RUN sh` 用的是 dash） | F) 改用 `find` ＋"一个都没检查到就 FAIL"（反向对照：改名后确实 FAIL）；B) 补 `.cjs/.mjs`；A) 对 `#!/bin/sh` 追加 `sh -n` |
+| R1 | 权重清单坏行只报前 4 行（第 5 到第 N 行被隐掉）；安装脚本对"追加块末行无换行"这一合法形状会假失败 | 报告带 `TOTAL=`；`install-pcieipc.sh` 的行数增量按形状给下限并出声说明（不改三个块的字节） |
+| R1/R3 | 磁盘余量只查根盘（`$DATA`/`$CACHE` 可能在别的盘）；`gen-console-env` 的 mkdir 跑在密钥门之前；`build.sh` usage 教了并不存在的 `BASE_IMAGE=`；`SKIP_PCIEIPC=1` 时还先打"层2 自动取名"；`--model-path /models` 写死 | `df` 按最近存在祖先分别查根盘与 `$DATA`/`$CACHE` 所在盘；mkdir 挪到密钥门之后；usage 改 `OFFICIAL=`/`BASE_IMAGE_ID=`；打印顺序按分支走；`MODEL_PATH=` 可覆盖 |
+| R3 | 文档与脚本对不齐若干：dry-run 的降级理由漏写"端口"；"四处破例"标题下只列了两处；`--restart no` 与四条缓存 bind 属本机漂移却当默认发出去；"9 档"易被读成包内只有 9 个提示词长度；权重步骤枚举 33 项却写"合计 34"；推荐档差集说成一行（实差 `id`、`name` ＋ env 三行）；跑自检必须自备仓外清单却没说明；`基线与口径说明` 把 44.14 与 44.55 当同一批；README 的内存/权重阈值与 `env-check` 的门不一致 | 逐条改文并把判据串与脚本原文逐字对齐；破例补齐为四条（推荐档、默认带回填层、`--restart no`、四条缓存 bind）并各写理由与出处；数字标批次与来源；默认值与门禁阈值对齐；README 目录树补 `install-pcieipc.sh`/`obligations.txt` 与仓外清单要求 |
+| R3（**驳回**） | "推荐档的 cache 根不在四条 bind 内 ⇒ `setup` 必失败" | 不成立：`start-here` 把 `$CACHE/root-cache` 绑到 `/root/.cache`，而 `BENCH_CACHE_ROOT` 默认 `/root/.cache/sm75-017` 正在它下面；实测容器内 uid=0、`accessSync(/root/.cache, W_OK)` 通过、现役面板 `settings.cacheRoot` 就是这个值 ⇒ 未改默认值 |
+
 ### 同轮一并处理（二档）
 
 改了的：`LICENSE/NOTICE` 重写为 0.1.7 叙述并补 FlashInfer 与"改过上游一个文件"的归属（Apache-2.0 §4(b)(c)(d)）；

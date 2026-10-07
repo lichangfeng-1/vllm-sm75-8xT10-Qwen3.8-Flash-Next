@@ -36,28 +36,39 @@
 
 ---
 
-## 二、四步上手
+## 二、五步上手
+
+前提二选一，否则第 1 步走不通：手上已有官方层0 标签 `vllm-sm75:v0.1.7-ultra-beta`，
+或者备一份 0.1.7 源码树并用 `SM75_SRC=/路径` 指过去（**本包不随附源码树**，`docker/build.sh` 只会调官方的构建入口）。
 
 ```bash
 # 1) 构建镜像（层0 官方 ultra → 层1 GPU 探测超时 20s → 层2 PCIe-IPC 回填）
 bash docker/build.sh                       # 已有官方基座时它只补层1、层2
+SM75_SRC=/path/VLLM-SM75-0.1.7-beta bash docker/build.sh    # 没有基座时：指源码树，层0 由官方入口建
 
 # 2) 环境体检 + 起容器（路径用同名环境变量覆盖，绝不写死在脚本里）
-bash run/env-check-v1.sh /path/to/model-dir          # 有 BLOCK 就非零退出，别跳过
+bash run/env-check-v1.sh /path/to/model-dir          # 有 BLOCK 就非零退出（4），别跳过
 DATA=/path/to/console-data MODELS=/path/to/model-dir \
   bash run/start-here-v1.sh --dry-run                # 先看组装出来的 docker run（零副作用）
 DATA=/path/to/console-data MODELS=/path/to/model-dir \
   bash run/start-here-v1.sh                          # 门禁全 PASS 才真起
+# NVAPI 默认直接吃包内 docker/libnvidia-api.so.1（sha 门现成能过），不用你手工摆到 $DATA 下；
+# 想用自己取的那份就显式传 NVAPI=/你的路径。
 
-# 3) 给档加那个环境变量（不加就还是 FIREFLY_AR，+31% 拿不到）
+# 3) 注册权重并从官方模板建档（引擎不会自起，档也不会自己长出来）
+docker exec <容器> node /console-data/tmp/console-driver-v1.cjs setup   # 输出 PROFILE_ID=…
+#    这一步等价于在面板里"注册权重目录 ＋ 选官方模板"；只想看一眼现有档就跑 probe
+
+# 4) 给档加那个环境变量（不加就还是 FIREFLY_AR，＋31% 拿不到；引擎在跑时工具会拒绝，先停）
 docker exec <容器> node /console-data/tmp/console-edit-profile-v1.cjs <profileId> \
   setenv VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC 1
-# 也可以直接用包里的推荐档模板 run/profiles/flash-next-tp8-256k-nomtp-pcieipc.json
-# （官方档 ＋ 那一条 env；官方原样档保留为基线，两份的差集就那一行）
+#    也可以直接用包里的推荐档模板 run/profiles/flash-next-tp8-256k-nomtp-pcieipc.json
+#    （它＝官方档 ＋ 那一条 env；两份的差集只有 id、name 两个标识 ＋ 那一条 env）
 
-# 4) 起引擎并复验签名（面板点「启动」，或命令行）
-docker exec <容器> node /console-data/tmp/console-driver-v1.cjs probe      # 现取 profileId
+# 5) 起引擎并复验签名（面板点「启动」，或命令行）
+docker exec <容器> node /console-data/tmp/console-driver-v1.cjs probe      # profileId 现取
 docker exec <容器> node /console-data/tmp/console-driver-v1.cjs start <profileId>
+docker exec <容器> node /console-data/tmp/console-driver-v1.cjs status <profileId>
 ```
 
 `tools/panel/` 那两个 `.cjs` 是面板的命令行驱动，`start-here-v1.sh` 会把它们拷到 `$DATA/tmp/`（= 容器内 `/console-data/tmp/`）。**不随包发就等于让复刻的人只能去网页上手点**，所以这一步是发布阻塞项。
@@ -95,25 +106,32 @@ tools/
   flash-next-tested.sha256  sha256-weights-v1.sh   权重全量校验（34 项＝15 主＋10 plefp8＋9 其它）
   gen-console-env-v1.sh                             把在役容器 env 落成宿主 600 文件
   bench-official-v1.sh                              官方随包尺子的封装（口径钉死＋可比性判定）
-  lint-package-v1.sh                                出厂自检（语法/行尾/反泄露/断链/清单）
+  lint-package-v1.sh                                出厂自检（语法/行尾/反泄露/断链/清单/COPY 自洽）
+                                                  ↑ 需要一份**仓库之外**的身份清单：PRIVACY_PATTERNS=/你的路径
+                                                    没有它这脚本直接判 FAIL——那是有意的（防止把真实姓名/用户名/
+                                                    宿主路径带进公开仓），clone 下来想跑自检得自己准备那份文件
 docs/                             实测对照与截图、给他人 AI 的自包含提示词
 ```
 
 ---
 
-## 四、默认值与两处破例（必须读）
+## 四、默认值与四处破例（必须读）
 
 包内 profile 模板是**官方 0.1.7 档原样**（MMBT 4096、util 0.92、`--kv-cache-memory-bytes 2415919104`、`--block-size 16`、`qwen3_xml`、`--compilation-config PIECEWISE`、QSA 一组 env），遵循"分享包默认值锁原始基线"的规矩；我们这台机的差异只写进 `基线与口径说明-v1.md` 的漂移项，不改包内默认。
 
 端口也一样：`API_PORT` 默认 **8000**（官方文档口径），我们本机用的 18001 是漂移项，不默认发出去。
 
-**两处破例**（都写在这里，别假装没有）：
+**四处破例**（都写在这里，别假装没有）：
 
-1. `run/profiles/flash-next-tp8-256k-nomtp-pcieipc.json` 是"官方模板＋`VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC=1`"的推荐档；官方原样那份仍是基线，两份逐字节只差这一条 env。发它的原因是：光有镜像那一层、档里不置这个变量，vLLM 默认不启用该后端，+31% 拿不到。
+1. `run/profiles/flash-next-tp8-256k-nomtp-pcieipc.json` 是"官方模板＋`VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC=1`"的推荐档；官方原样那份仍是基线，两份的差集只有三行：`id` 与 `name` 两个标识 ＋ 那一条 env。发它的原因是：光有镜像那一层、档里不置这个变量，vLLM 默认不启用该后端，+31% 拿不到。
 2. `docker/build.sh` 默认会产出并推荐带 PCIe-IPC 回填层的镜像。理由是该增益在这台机上量级明确（decode ＋30.5%～＋33.1%）且可一键退回。请知悉三点：
    1. 这层是**我们自维护**的：把 FlashInfer 0.7.0.post1 里的 6 个文件与 3 处导出补进已装的 0.6.18，**不升级 FlashInfer、不动 attention 内核与 cubin**。官方产物点不亮这个后端（官方镜像同样钉 0.6.18）。
    2. 退回官方形态只要一条命令：`SKIP_PCIEIPC=1 bash docker/build.sh`，或启动时不置 `VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC`（也别用上面那份推荐档）。
    3. 上游 FlashInfer 一旦带上 `PcieIpcAllReduceWorkspace`（0.7 起自带），**这层应当撤除**，不要长期叠加。
+3. **`--restart no`**（官方文档示例里有 `unless-stopped` 的写法）。理由：生产惯例——开机不自起、不自起抢卡；
+   这台机上引擎是"用完即停"的，自起会在开机时和别的容器抢八卡。要常驻服务就自己显式改 `RESTART=`。
+4. **四条缓存 bind**（`.cache`/`.triton`/`.nv`/`.tilelang`），比官方示例多一条 `.tilelang`。
+   理由：`docker diff` 实测它落在容器可写层，重建容器就重付一次编译费。少一条的表现不是报错而是"启动变慢几分钟"。
 
 ---
 
@@ -123,8 +141,8 @@ docs/                             实测对照与截图、给他人 AI 的自包
 |---|---|---|
 | GPU | 8 × Tesla T10（sm_75，16 GiB），纯 PCIe 无 NVLink | 其他 sm_75 卡需重测常量 |
 | 驱动 / CUDA | ≥ 570，CUDA 12.9 | 引擎内 CUDA，不依赖宿主 toolkit |
-| 宿主内存 | ≥ 128 GiB 可用；容器内存上限按官方文档 112 GiB | 权重加载峰值实测 110.7/112 GiB，**别调低** |
-| 磁盘 | 权重约 124 GiB；根盘余量 ≥ 40 GiB | 大构建前先现采 `df` |
+| 宿主内存 | 总内存 ≥ 128 GiB；**可用** ≥ 110 GiB（`env-check` 的门），容器内存上限按官方文档 112 GiB | 权重加载峰值实测 110.7/112 GiB，**别调低** |
+| 磁盘 | 权重约 120–124 GiB（按修订版本）；根盘余量 ≥ 40 GiB | 大构建前先现采 `df`；`$DATA`/`$CACHE` 在别的盘时那一盘的余量也一起看 |
 | 权重 | 官方 tested 修订（`tools/flash-next-tested.sha256` 34 项全对＝15 主分片＋10 plefp8＋9 其它） | 权重不同则所有数字不可与本包对照 |
 | 面板两处必修 | ① GPU 探测超时 3s→20s；② NVAPI 只读 bind | 缺①面板报「无法读取 GPU 状态」HTTP 400 拒启；缺②面板拒绝启引擎 |
 
@@ -142,6 +160,7 @@ docs/                             实测对照与截图、给他人 AI 的自包
 8. **面板 profile 日志跨次追加**。任何计数类判据（FP8 layout 96、p2p 8）必须只取本次启动新增的字节切片，否则会翻倍。
 9. **端口默认只绑 127.0.0.1**。要局域网访问得显式 `BIND_HOST=0.0.0.0` 重跑，并且自己加上鉴权（档里给引擎配 `--api-key`，或前置反代）——本包不会替你把无鉴权的推理端口发到公网上。
 10. **env 覆盖口用分号不用逗号**。`BOOTSTRAP_ENV` 里 `PSTATE_GPUS=0,1,2,3,4,5,6,7` 这种含逗号的值是常态，拿逗号当分隔符会把值切碎，碎出来的 `-e 1` 变成"透传宿主变量 1"＝静默丢值。脚本切完还逐片验形状，不合规直接 BLOCK。
+11. **`MODELS` 挂哪一层要跟 profile 的 `defaultModel` 对齐**。包内官方档写的是 `/models/Qwen3.8-Flash-Next-W4A16-FP8PLE`（父目录挂法）；把**模型目录本身**挂成 `/models`（我们生产即此形态）时，注册权重后面板会用 `${MODEL}` 填 argv[0]，但 `defaultModel` 那个显示值指不到——表现是"面板看得见模型、点启动起不来"。启动入口两种挂法都认（门禁会在两种之一 PASS），但注册路径与 `defaultModel` 得你自己对齐。
 
 ---
 

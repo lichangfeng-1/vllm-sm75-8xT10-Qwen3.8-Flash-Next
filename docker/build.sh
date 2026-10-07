@@ -13,8 +13,8 @@
 #   SKIP_TO20S=1 bash build.sh         # 只做层2，基座用层0（层2 标签自动叫 …-ultra-beta-pcieipc）
 #   SKIP_PCIEIPC=1 bash build.sh       # 只要官方形态（层0+层1）
 #   SKIP_NVAPI=1 bash build.sh         # 不带 P-State 宿主库也能走完（构建本来不碰它，这里只放行前置门）
-#   BASE_IMAGE=本地已有标签 MODE=layers bash build.sh
-#   BASE_IMAGE_ID=repo@sha256:<digest> # 把 FROM 钉到 digest，别只信 tag
+#   OFFICIAL=本地已有标签 MODE=layers bash build.sh    （层0 标签名）
+#   BASE_IMAGE_ID=repo@sha256:<digest>                 （把 FROM 钉到 digest，别只信 tag）
 #
 # 复核要点：
 #   1) 绝不隐式拉取：所有基础标签必须本地在位，缺就报错让人先建/先导。
@@ -118,7 +118,7 @@ else
 fi
 
 # 层2 标签按"实际走过的层"自动命名：SKIP_TO20S=1 时基座是层0，就不该再挂 -to20s 这个名字
-if [ -z "$FINAL" ]; then
+if [ -z "$FINAL" ] && [ "$SKIP_PCIEIPC" != "1" ]; then
   if [ "$SKIP_TO20S" = "1" ]; then FINAL="$OFFICIAL-pcieipc"; else FINAL="$TO20S-pcieipc"; fi
   say "  （层2 标签自动取名：$FINAL；要别的名字就显式 FINAL=…）"
 fi

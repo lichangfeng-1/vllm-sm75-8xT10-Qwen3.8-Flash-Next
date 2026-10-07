@@ -38,6 +38,11 @@ n_sh=0
 while IFS= read -r f; do
   n_sh=$((n_sh + 1))
   bash -n "$f" || bad "bash -n 失败: $f"
+  # 首行 #!/bin/sh 的脚本（被 Dockerfile 的 RUN sh 消费，容器里 sh 是 dash）必须再过 sh -n：
+  # bash -n 会放过 [[ ]]、数组这些在 dash 里直接 Syntax error 的 bashism。
+  if [ "$(head -1 "$f")" = '#!/bin/sh' ] && command -v sh >/dev/null 2>&1; then
+    sh -n "$f" || bad "sh -n 失败（该脚本按 #!/bin/sh 被消费）: $f"
+  fi
 done < <(find . -type f -name "*.sh" -not -path "./.git/*")
 ok ".sh 文件 $n_sh 个全部过 bash -n"
 n_py=0
@@ -56,7 +61,7 @@ d=open(sys.argv[1],'rb').read()
 if b'\r' in d: sys.exit(1)
 d.decode('utf-8')
 " "$f" 2>/dev/null; then :; else cr=$((cr + 1)); bad "含 CR 或非 UTF-8: $f"; fi
-done < <(find . -type f \( -name "*.sh" -o -name "*.py" -o -name "*.md" -o -name "*.json" -o -name "*.txt" -o -name "*.cu" -o -name "*.cuh" \) -not -path "./.git/*")
+done < <(find . -type f \( -name "*.sh" -o -name "*.py" -o -name "*.md" -o -name "*.json" -o -name "*.txt" -o -name "*.cu" -o -name "*.cuh" -o -name "*.cjs" -o -name "*.mjs" \) -not -path "./.git/*")
 [ "$cr" = "0" ] && ok "全部文本文件 LF + UTF-8"
 
 echo "=== C) 凭据与隐私扫描 ==="
@@ -79,7 +84,9 @@ else
   bad "缺仓外身份清单 $PFILE ⇒ 具体姓名/用户名/宿主路径/内网段没扫。补法：在该文件里逐行写 ERE（此文件必须在仓库之外）"
 fi
 # 通用"机器专属形状"内置（不含任何具体身份值）
-hits=$(grep -rInE "(/home/|/Users/)[a-z0-9._-]{4,}|K:\\|C:\\Users|[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" . --exclude-dir=.git --exclude=SHA256SUMS.txt 2>/dev/null | grep -vE "0[.]0[.]0[.]0|127[.]0[.]0[.]1|localhost" | cut -d: -f1,2 | head -12)
+# 反斜杠必须写成字符类：上一版这里写的是"盘符＋反斜杠＋竖线＋C:＋反斜杠＋Users"那种形式，经 bash 递给 grep 之后
+# 竖线被转义成了**字面竖线**，那条分支永不为真 ⇒ 盘符路径的门整个失明（旧写法对盘符样本零命中，改成字符类后命中）。
+hits=$(grep -rInE "(/home/|/Users/)[a-z0-9._-]{4,}|[A-Za-z]:[\\]|[0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}" . --exclude-dir=.git --exclude=SHA256SUMS.txt 2>/dev/null | grep -vE "0[.]0[.]0[.]0|127[.]0[.]0[.]1|localhost" | cut -d: -f1,2 | head -12)
 [ -n "$hits" ] && bad "疑似本机专属路径/IP 形状:$(echo "$hits" | tr '
 ' ' ')" || ok "无本机路径与 IP 形状命中"
 
@@ -138,8 +145,12 @@ echo "=== F) build.sh 与 Dockerfile 的 COPY 自洽（B1 那一类：引用了�
 #   Dockerfile.pcieipc-v1 -> 上下文 = docker/pcieipc/    （cp -r pcieipc/. 到根，Dockerfile 改名放进去）
 copy_ctx() { case "$1" in *Dockerfile.to20s-v1) echo docker ;; *Dockerfile.pcieipc-v1) echo docker/pcieipc ;; *) echo "" ;; esac; }
 f_copy=0
-for df in docker/Dockerfile.*; do
-  [ -f "$df" ] || continue
+# 用 find 而不是 glob：glob 空匹配时 bash 会把字面量 "docker/Dockerfile.*" 递进循环，
+# 于是"一个 Dockerfile 都没检查到"会被当成"检查过了"——那正是要防的假通过。
+df_list=$(find docker -maxdepth 1 -type f -name 'Dockerfile.*' | sort)
+n_df=$(printf '%s
+' "$df_list" | grep -c . )
+for df in $df_list; do
   ctx=$(copy_ctx "$df")
   [ -n "$ctx" ] || { bad "$df 不在 build.sh 的上下文映射里（改了 build.sh 就要同步改这里）"; continue; }
   # COPY 的最后一个字段是**目标**，源是中间那些；把目标当源查会必然假失败。
@@ -152,7 +163,10 @@ for df in docker/Dockerfile.*; do
     fi
   done < <(grep -E '^[[:space:]]*COPY[[:space:]]' "$df" | sed -E 's/^[[:space:]]*COPY[[:space:]]+//; s/(--[a-z-]+=[^ ]+[[:space:]]+)//g; s/[[:space:]]*$//' | awk '{for(i=1;i<NF;i++) print $i}')
 done
-[ "$f_copy" = "0" ] && ok "Dockerfile 的 COPY 源在各自构建上下文里全部在位"
+if [ "$n_df" = "0" ]; then
+  bad "F) 一个 Dockerfile 都没检查到（glob 空匹配＝假通过）；docker/Dockerfile.* 改名或搬家要同步 copy_ctx 映射"
+elif [ "$f_copy" != "0" ]; then bad "F) 有 $f_copy 个 COPY 源不在位"
+else ok "Dockerfile 的 COPY 源在各自构建上下文里全部在位（检查 $n_df 个）"; fi
 
 echo
 [ "$fail" = "0" ] && { echo "LINT_PASS"; exit 0; } || { echo "LINT_FAIL 上面 FAIL 项必须清零才能对外发"; exit 3; }

@@ -23,7 +23,10 @@ IMG=${IMG:-vllm-sm75:v0.1.7-ultra-beta-to20s-pcieipc}
 DATA=${DATA:-/var/lib/sm75-console}                       # 面板数据目录（宿主侧，容器内是 /console-data）
 MODELS=${MODELS:-/var/lib/sm75-models/Flash-Next-FP8PLE}  # 权重目录，只读挂成 /models
 CACHE=${CACHE:-/var/lib/sm75-cache}                       # 四条 JIT/编译缓存的宿主根
-NVAPI=${NVAPI:-$DATA/nvapi/libnvidia-api.so.1}            # P-State 需要的宿主库（只读 bind）；不用 P-State 就 NVAPI=none
+# NVAPI 默认吃包内那份（文件天然在位、sha 门现成能过）。上一版默认写 $DATA/nvapi/... 而没人把文件放到那儿，
+# 照 README 粘命令的人第一步就撞 BLOCK——而拷文件算写操作，门禁前又不能做，于是成了死结。
+# 想用自己从驱动里取的那份，就显式 NVAPI=/你的路径；不用 P-State 就 NVAPI=none。
+NVAPI=${NVAPI:-$P/docker/libnvidia-api.so.1}
 ENVFILE=${ENVFILE:-$DATA/console.env}                     # 有则用它；没有则用 BOOTSTRAP_ENV
 BIND_HOST=${BIND_HOST:-127.0.0.1}                         # 端口默认只绑回环；要局域网访问显式改成 0.0.0.0 并自行加鉴权
 PANEL_PORT=${PANEL_PORT:-1615}                            # 控制台 Web 对外端口
@@ -51,12 +54,29 @@ BOOTSTRAP_DEFAULT=(
 )
 # 覆盖口用分号而不是逗号：PSTATE_GPUS 这类值本来就含逗号，用逗号当分隔符会把值切碎，
 # 碎出来的 "-e 1" 变成"透传宿主变量 1"＝静默丢值。切完还逐片验形状，不合规就 BLOCK。
+# 约定：BOOTSTRAP_ENV="" 或没设 ⇒ 用包内默认集（这是安全侧，不是"什么都不发"）；
+#       设了内容但不合规（例如只有分号）⇒ 门禁 BLOCK。静默零 env 起跑是最坏的形态。
 BOOTSTRAP=()
 if [ -n "${BOOTSTRAP_ENV:-}" ]; then
   IFS=';' read -ra BOOTSTRAP <<< "$BOOTSTRAP_ENV"
 else
   BOOTSTRAP=("${BOOTSTRAP_DEFAULT[@]}")
 fi
+# NVAPI=none 却仍带 POWER_MODE=pstate ＋ PSTATE_* 是自相矛盾（面板会拒绝启引擎）。
+# 显式不带 P-State 库时，默认集跟着换成 sleep——不留"记得手工改"的坑。
+if [ "$NVAPI" = "none" ]; then
+  nb=()
+  for kv in "${BOOTSTRAP[@]}"; do
+    case "$kv" in
+      POWER_MODE=*) nb+=(POWER_MODE=sleep) ;;
+      PSTATE_*) : ;;
+      *) nb+=("$kv") ;;
+    esac
+  done
+  BOOTSTRAP=("${nb[@]}")
+fi
+# 注意：BOOTSTRAP_ENV=""（或只有分号）会切出空数组 ⇒ 一个 -e 都不发。这个后果留到门禁里判
+# （见下面"最小 env 集"那一项），不在这里报错——那时 bad()/fail 还没定义，写了也不算数。
 
 DRY=no
 for a in "$@"; do
@@ -113,7 +133,7 @@ for hp in "$PANEL_PORT" "$API_PORT"; do
   if [ -z "$holder" ] && command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -qE "[:.]$hp[[:space:]]"; then
     holder="(宿主上有进程在听，非容器)"
   fi
-  if [ -n "$holder" ]; then bad "宿主端口 $hp 被 $holder 占着"; else good "宿主端口 $hp 空闲"; fi
+  if [ -n "$holder" ]; then msg "宿主端口 $hp 被 $holder 占着（真起容器会撞端口；--dry-run 只看组装，故降为 WARN）"; else good "宿主端口 $hp 空闲"; fi
 done
 
 busy=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | awk '$1>1000{n++} END{print n+0}')
@@ -130,19 +150,43 @@ elif ls "$MODELS"/*/config.json >/dev/null 2>&1; then
 else bad "在 $MODELS 及其一级子目录里都没找到 config.json —— 权重没就位，后面全部免谈"; fi
 
 if [ -s "$ENVFILE" ]; then
-  if grep -qiE '^(VLLM_API_KEY=|.*TOKEN=|.*SECRET=|.*PASSWORD=)' "$ENVFILE"; then
-    bad "env-file 里有密钥类变量，先剔除（面板登录 token 在容器内 /console-data/key，不需要进 env）"
-  else good "env-file $(grep -c '^' "$ENVFILE") 条、权限 $(stat -c '%a' "$ENVFILE")、无密钥类"; fi
-else
-  badenv=""
-  for kv in "${BOOTSTRAP[@]}"; do
-    printf '%s' "$kv" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*=[^;]+$' || badenv="$badenv [$kv]"
-  done
-  if [ -n "$badenv" ]; then
-    bad "BOOTSTRAP_ENV 里有不合规片段（每项须为 KEY=VALUE，分隔符是分号不是逗号；值含逗号是允许的）:$badenv"
+  # 只认"变量名里带密钥类字样"的行（锚到 = 号前的名字），不按值匹配：
+  # 原写法 `.*TOKEN=` 之类会被 `VLLM_SOMETHING=autoTOKEN=x` 这种值命中、也会被正常变量名误伤。
+  if grep -qE '^[A-Za-z0-9_]*(API_KEY|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|CREDENTIAL)=' "$ENVFILE"; then
+    bad "env-file 里有密钥类变量（名字含 API_KEY/TOKEN/SECRET/PASSWORD/PRIVATE_KEY/CREDENTIAL），先剔除"
+    echo "        命中项：$(grep -oE '^[A-Za-z0-9_]*(API_KEY|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|CREDENTIAL)' "$ENVFILE" | tr '\n' ' ')"
   else
-    good "无 env-file，本次用最小 env 集 ${#BOOTSTRAP[@]} 条（$(printf '%s ' "${BOOTSTRAP[@]}" | cut -c1-120)…）"
-    warn "跑起来后建议用 tools/gen-console-env-v1.sh 固化成 $ENVFILE，别再依赖默认集"
+    perm=$(stat -c '%a' "$ENVFILE" 2>/dev/null || stat -f '%Lp' "$ENVFILE" 2>/dev/null || echo 未知)
+    good "env-file $(grep -c '^' "$ENVFILE") 条、权限 $perm、无密钥类"
+    root=$(grep -E '^SM75_CONSOLE_ROOT=' "$ENVFILE" | tail -1 | cut -d= -f2-)
+    if [ -z "$root" ]; then
+      # 没写不等于没事：镜像自带默认是 /data，那在容器可写层里，重建就把 profiles.json 与登录 key 一起丢掉
+      bad "env-file 里没有 SM75_CONSOLE_ROOT ⇒ 面板会退回镜像默认的 /data（容器可写层，重建即丢）。补一行 SM75_CONSOLE_ROOT=/console-data"
+    elif [ "$root" != "/console-data" ]; then
+      bad "env-file 里 SM75_CONSOLE_ROOT=$root，不是 /console-data（＝$DATA 那条 bind 的目标）⇒ 档与登录 key 不落宿主"
+    else good "env-file 里 SM75_CONSOLE_ROOT=/console-data（与 bind 目标一致）"; fi
+  fi
+else
+  if [ "${#BOOTSTRAP[@]}" = "0" ]; then
+    # 手滑写成 BOOTSTRAP_ENV="" 或 ";" 时会切出空数组：一个 -e 都不发，而其余门禁照样全绿 ⇒
+    # 面板把 profiles.json 写进镜像默认的 /data 而不是 bind 里的 /console-data（＝B2 那个"重建即丢"）。
+    bad "BOOTSTRAP_ENV 切出来是 0 项（分隔符是分号不是逗号）。处置：给它正常内容，或 unset 它改用包内默认集（${#BOOTSTRAP_DEFAULT[@]} 条）"
+  else
+    badenv=""
+    secretenv=""
+    for kv in "${BOOTSTRAP[@]}"; do
+      printf '%s' "$kv" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*=[^;]+$' || badenv="$badenv [$(printf '%s' "$kv" | cut -c1-24)…]"
+      # 名字判据与 env-file 那一条同一套，只报变量名、绝不回显值
+      printf '%s' "$kv" | grep -qE '^[A-Za-z0-9_]*(API_KEY|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|CREDENTIAL)='         && secretenv="$secretenv [$(printf '%s' "$kv" | cut -d= -f1)]"
+    done
+    if [ -n "$badenv" ]; then
+      bad "BOOTSTRAP_ENV 里有不合规片段（每项须为 KEY=VALUE，分隔符是分号不是逗号；值含逗号是允许的）:$badenv"
+    elif [ -n "$secretenv" ]; then
+      bad "BOOTSTRAP_ENV 里有密钥类变量:$secretenv —— 走 -e 会把值写进本脚本 stdout 与宿主 docker run 的 argv（谁 ps 都看得到）。处置：把它们放进 $ENVFILE（chmod 600，本脚本走 --env-file），或从覆盖口里去掉"
+    else
+      good "无 env-file，本次用最小 env 集 ${#BOOTSTRAP[@]} 条：$(printf '%s ' "${BOOTSTRAP[@]}" | cut -d= -f1 | tr -s ' ' ' ' | cut -c1-160)…"
+      warn "跑起来后建议用 tools/gen-console-env-v1.sh 固化成 $ENVFILE（走 --env-file 值不进 argv），别再依赖默认集"
+    fi
   fi
 fi
 
@@ -155,8 +199,23 @@ else
   else bad "缺 NVAPI 文件 $NVAPI（面板会拒绝启引擎；见 docker/NVAPI-获取说明-v1.md，或显式 NVAPI=none 走 sleep）"; fi
 fi
 
+# 余量分两块看：镜像层落在根盘，profiles/缓存/env-file 落在 $DATA 与 $CACHE 所在盘——
+# 只查根盘会漏（DATA 指到 /data 这种另一块盘的路径时，根盘余量说明不了它能不能写）。
+nearest_exists() {
+  d="$1"
+  while [ ! -d "$d" ] && [ "$d" != "/" ]; do d=$(dirname "$d"); done
+  printf '%s' "$d"
+}
 avail=$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')
-if [ "${avail:-0}" -ge 40 ]; then good "根盘余量 $avail GiB"; else bad "根盘余量 $avail GiB < 40"; fi
+if [ "${avail:-0}" -ge 40 ]; then good "根盘余量 $avail GiB（镜像层用）"; else bad "根盘余量 $avail GiB < 40"; fi
+for where in "$DATA" "$CACHE"; do
+  tgt=$(nearest_exists "$where")
+  a2=$(df -BG --output=avail "$tgt" 2>/dev/null | tail -1 | tr -dc '0-9')
+  if [ -z "$a2" ]; then warn "$where 所在盘读不到余量（df 失败），跳过这一项"
+  elif [ "$tgt" = "/" ]; then good "$where 就在根盘（$a2 GiB）"
+  elif [ "$a2" -ge 20 ]; then good "$where 所在盘（$tgt）余量 $a2 GiB"
+  else bad "$where 所在盘（$tgt）余量只有 $a2 GiB < 20（面板数据与四条缓存都写这里）"; fi
+done
 
 # 包内面板 CLI 工具（B10：不发这两个文件，别人照包跑就点不亮那个后端）
 for f in console-driver-v1.cjs console-edit-profile-v1.cjs; do
@@ -254,7 +313,12 @@ else
   warn "该镜像没有 sm75.localpatch 标签（未打 20s 层）⇒ 跳过断言；本机 hardware.py 要 6.0–6.9 s，面板可能拒启"
 fi
 
-# 5.4 面板 CLI 工具真的在容器里看得见（$DATA 挂进 /console-data 的映射关系只有起完才验得准）
+# 5.4 容器内 /console-data 确实指向那条 bind（看挂载表，不看"我 --volume 过"）
+if docker inspect -f '{{range .Mounts}}{{.Destination}}{{println .}}{{end}}' "$NAME" 2>/dev/null | grep -qx "/console-data"; then
+  echo "  PASS /console-data 在挂载表里"
+else cf "/console-data 不在挂载表里（面板数据会落在容器可写层）"; fi
+
+# 5.5 面板 CLI 工具真的在容器里看得见
 for f in console-driver-v1.cjs console-edit-profile-v1.cjs; do
   if docker exec "$NAME" test -s "/console-data/tmp/$f"; then echo "  PASS 容器内可见 /console-data/tmp/$f"
   else cf "/console-data/tmp/$f 在容器里看不到（bind 映射没生效？）"; fi

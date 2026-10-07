@@ -89,10 +89,14 @@ append_block() {
   cat "$block" >> "$target"
   after=$(wc -l < "$target" | tr -dc '0-9')
   delta=$((after - before))
-  if [ "$delta" != "$blk" ]; then
-    echo "ASSERT_FAIL $label 行数增量 $delta != 块行数 $blk（追加写歪）"; exit 9
+  # 块末行没有换行符时 cat >> 会让块尾与目标原有内容并到同一行 ⇒ wc -l 少计 1。
+  # 包内三个块都以换行结尾（delta 恒等于 blk），但万一物料换了形状，这里要出声、不要假失败也不要静默放宽。
+  if [ "$(tail -c 1 "$block" | wc -l | tr -dc '0-9')" = "0" ]; then allow=$((blk - 1)); else allow="$blk"; fi
+  if [ "$delta" != "$blk" ] && [ "$delta" != "$allow" ]; then
+    echo "ASSERT_FAIL $label 行数增量 $delta != 块行数 $blk（允许下限 $allow，追加写歪）"; exit 9
   fi
-  echo "  APPEND $label before=$before blk=$blk after=$after"
+  [ "$delta" = "$blk" ] || echo "  NOTE $label 块末行无换行 ⇒ 增量 $delta 比块行数 $blk 少 1（按合法形状放行）"
+  echo "  APPEND $label before=$before blk=$blk after=$after delta=$delta"
 }
 append_block "$FI/jit/comm.py"                "$CTX/append/jit_comm.txt"   "jit/comm.py"
 append_block "$FI/trace/templates/comm.py"    "$CTX/append/trace_comm.txt" "trace/templates/comm.py"

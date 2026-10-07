@@ -13,7 +13,7 @@
 set -u
 REQ_GPU_COUNT=${REQ_GPU_COUNT:-8}
 REQ_GPU_MIB=${REQ_GPU_MIB:-15000}          # T10 可见 15.56 GiB ≈ 15933 MiB，留余量取 15000
-REQ_RAM_G=${REQ_RAM_G:-110}                # 容器内存上限 112 GiB，宿主可用要压得住
+REQ_RAM_G=${REQ_RAM_G:-110}                # 官方要求总内存 ≥128 GiB；这里是"宿主可用"门（容器上限 112 GiB 得压得住）
 REQ_DISK_G=${REQ_DISK_G:-40}
 REQ_WEIGHT_G=${REQ_WEIGHT_G:-120}
 MIN_DRIVER=${MIN_DRIVER:-570}
