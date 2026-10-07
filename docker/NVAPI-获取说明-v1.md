@@ -1,52 +1,58 @@
-# NVAPI 库说明（`libnvidia-api.so.1` · 2026-10-01 · 发版件）
+# NVAPI 库说明（`libnvidia-api.so.1` · 2026-10-07 · 0.1.7 包线）
 
-## 获取：直接从本 GitHub 仓库下载
-本仓**随附**该库副本：`docker/libnvidia-api.so.1`（720,104 字节）。
-clone 整仓或网页下载单文件均可：
-- `git clone https://github.com/lichangfeng-1/vllm-sm75-016-8xT10-Qwen3.8-Flash-Next-W4A16-FP8PLE.git` 后取 `docker/libnvidia-api.so.1`；
-- 或网页进入 `docker/` 目录点该文件下载（注意：raw.githubusercontent.com 在部分网络不可达，优先前两种）。
-下载后必过 sha 门禁：
+## 先说清一件事：0.1.7 这条线不把它烘进镜像
+
+0.1.6 包把它做成了一个镜像层（`Dockerfile.nvapi`）。**0.1.7 官方形态不是这样**：
+这个库以**宿主文件只读 bind** 的方式进容器（`run/start-here-v1.sh` 里那条
+`$NVAPI:/usr/local/nvidia/lib64/libnvidia-api.so.1:ro`），与官方 0.1.7 文档一致。
+所以 `docker/build.sh` 里跟它有关的只有"前置门"——查文件在不在、sha 对不对，仅此一项而已。
+
+它只服务控制台的 **P-State 电源管理**：面板启引擎前要读/写 GPU 电源档，缺这个库
+`validateProfile` 那关过不去，面板直接拒绝启引擎。推理本体（模型加载、生成）与它无关。
+
+## 获取：直接从本仓库下载
+
+本仓**随附**该库副本：`docker/libnvidia-api.so.1`（720,104 字节，sha256 见下）。
+clone 整仓，或网页进入 `docker/` 目录点该文件下载均可
+（注意：raw.githubusercontent.com 在部分网络不可达，优先 clone）。
+放到你指定的宿主路径后必过 sha 门禁：
+
 ```bash
 sha256sum libnvidia-api.so.1
 # 须等于 4a199f9b259a1098ab9c01d31c67f882a2531a0fbb9c3595ad3d016c7d131d8c
 ```
 
-## 它是什么、配什么驱动
-- NVIDIA 驱动配套组件，本包用于控制台的 **P-State 电源管理**（层 2 `Dockerfile.nvapi` 烘进镜像）。
-- 随附副本与驱动 **580.173.02** 配套实测（sha 即门禁值）。**换驱动版本**时该库可能不同：
-  优先用本仓副本试；P-State 异常再按下面"重新获取"或走降级路。
+配什么驱动：随附副本与 **580.173.02** 配套实测（sha 即门禁值）。换驱动版本时该库可能不同：
+先用本仓副本试，P-State 有异常再按下面"自己取件"或走降级路。
 
-## 干脆不带这个文件（`SKIP_NVAPI=1`）
-不想在本地保留这个 NVIDIA 专有二进制时，整层跳过即可（`docker/build.sh` v6 起是真开关，不需要手工注释 Dockerfile）：
+## 干脆不带这个文件（三处一起改，少一处就是"构建过了但面板拒启"）
 
 ```bash
-SKIP_NVAPI=1 bash docker/build.sh incple
-```
-
-- 行为：层 2 不构建，层 1 产物直接打标签给 `…:patched-nvapi`，层 3/4 照常建在它上面；
-- 代价：**没有该库，控制台的 P-State 电源管理校验会拒起引擎**。三套档模板里的
-  `power.mode` 都写死 `pstate`，要改成 `sleep`（等价"不管电源"）：
-
-```bash
+SKIP_NVAPI=1 bash docker/build.sh                       # ① 放行构建前置门
+NVAPI=none   bash run/start-here-v1.sh                  # ② 起容器时不加那条 bind
+# ③ profile 的 power.mode 从 pstate 改成 sleep（等价"不管电源"）：
+#    还没建档、用包内模板的话直接改模板：
 sed -i 's/"mode": "pstate"/"mode": "sleep"/' run/profiles/*.json
+#    已经建好的档：在控制台网页里改那一项。console-edit-profile-v1.cjs 只管 env 与 args，
+#    不碰 power（power 不在 argv 里，走的是面板设置接口）。
 ```
 
-  或者建档之后在控制台网页里改。**只改模板不够**——已经建好的档要重新 POST 或在控制台里改一次。
-- 推理本身、其余补丁层、模型加载与生成都与这个库无关。
-- 之后想补回来：按下面方法 A 自己取件，放进 `docker/`，正常 `bash build.sh` 即可（sha 门禁会验）。
+代价：**没有这个库就没有 P-State 托管**，空闲时不会把卡拉到低功耗档。
+包内两份 profile 模板默认都是 `power.mode=pstate`＋`gpus=0..7`（与官方模板一致），
+`validateProfile` 里没有"关电源"这个选项，只有 `pstate` / `sleep` 两档。
 
+## 文件缺失或换驱动时的自己取件
 
-## 文件缺失或换驱动时的重新获取
-- **方法 A（已实证）**：从任何已含该库的同族镜像提取：
-  ```bash
-  docker run --rm --entrypoint cat <含该库的镜像> /usr/local/nvidia/lib64/libnvidia-api.so.1 \
-    > libnvidia-api.so.1
-  sha256sum libnvidia-api.so.1   # 过门禁才可用
-  ```
-- **降级路（已实证语义）**：没有该库也能跑推理——把档模板 `power.mode` 改 `sleep`
-  （等价"不管电源"；validateProfile 没有"关电源"选项），其余功能不受影响。
-  本包三套模板默认 `pstate`＋`gpus=0..7`；走降级路时同步改模板或建档后在控制台改。
+从任何已含该库的同族镜像提取（已实证）：
+
+```bash
+docker run --rm --entrypoint cat <含该库的镜像> /usr/local/nvidia/lib64/libnvidia-api.so.1 \
+  > libnvidia-api.so.1
+sha256sum libnvidia-api.so.1   # 过门禁才可用
+```
 
 ## 红线
-- 不要从不明来源下载同名文件、不过 sha 就进镜像（供应链）。
+
+- 不要从不明来源下载同名文件、不过 sha 就 bind 进容器（供应链）。
 - 该库只服务 P-State；引擎本体（加载/推理/控制台）不依赖它。
+- 别把它当"性能项"：它不改吞吐。它决定的是面板肯不肯启引擎、以及空闲功率档。

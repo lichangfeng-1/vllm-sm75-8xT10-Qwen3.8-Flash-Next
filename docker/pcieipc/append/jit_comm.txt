@@ -1,0 +1,13 @@
+
+
+def gen_pcie_ipc_comm_module() -> JitSpec:
+    # No architecture restriction: the kernels use only plain PTX loads/stores
+    # and CUDA IPC, both of which predate every architecture flashinfer builds
+    # for. The target is a PCIe machine without NVLink, which is orthogonal to
+    # the SM version.
+    return gen_jit_spec(
+        "pcie_ipc_comm",
+        [
+            jit_env.FLASHINFER_CSRC_DIR / "pcie_ipc_all_reduce.cu",
+        ],
+    )

@@ -1,0 +1,13 @@
+# T11a backport 物料清单（extract-pcieipc.py 生成）
+# source_wheel=flashinfer_python-0.7.0.post1-py3-none-any.whl
+# source_wheel_sha256=c7adf826568d61fc1b7d3aadd4cae387a35a138bfc08e2deca2f34ecfa280716
+# 列: 相对路径 <TAB> 行数 <TAB> 字节 <TAB> sha256 <TAB> 类型
+newfiles/flashinfer/comm/pcie_ipc_ar.py	1003	44053	b8d8c8d53396880e1fe7db82f598467e5b6e4807d675bfcb99b1cd63ce612e16	verbatim
+newfiles/flashinfer/comm/pcie_ipc_policy.py	189	7253	d03c82bbca75a9d8df28f0aba5c863a8f9332c6faa22175a73d8b2f28678f3bb	verbatim
+newfiles/flashinfer/comm/pcie_ipc_topology.py	211	8265	26f473a1acdce258f1b8ca4240f6c4c028554b257d4b16a5c44902505546edb2	verbatim
+newfiles/flashinfer/comm/pcie_ipc_tuning.py	531	20829	d20d088fc287bb36a865d66e682dc696c2196d54be3e6dddad64ae4765133df8	verbatim
+newfiles/flashinfer/data/csrc/pcie_ipc_all_reduce.cu	207	9694	b2646bcef5e3e11dc9a5243cd7cd750cf75d54a8c199457f01fdcc56e28d817a	verbatim
+newfiles/flashinfer/data/include/flashinfer/comm/pcie_ipc_all_reduce.cuh	2248	98049	f03a372c53c20c3176cddd0f90db6242222a01ebebcbc83af96b169c37bf57a1	verbatim
+append/jit_comm.txt	14	449	08985c7a8e86f7af318373425ddea29ecbbbab801634acc2e6f1aad854a9ddea	append
+append/trace_comm.txt	73	2258	58621d55be9d6cd6f2095d54cc50287ee103022c697513e6464c8dddd25b6e0a	append
+append/comm_init.txt	21	811	f616d6cfe1cdd6b1cf746f2d1d5d0458e7f80c1ae7b6697fc3aced417929e42c	append

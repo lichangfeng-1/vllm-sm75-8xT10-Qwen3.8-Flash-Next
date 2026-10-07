@@ -22,3 +22,15 @@ lineage/
 __pycache__/
 *.pyc
 .DS_Store
+
+# 凭据与本机运行产物（三轮审查 R2#6：这些形状上一版没覆盖）
+*.env
+console.env
+*.bak-*
+*.bak
+key
+engine-key*
+*.out
+nohup.out
+*.pid
+内部/*.log
