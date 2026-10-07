@@ -1,116 +1,187 @@
-# SM75 v0.1.6 自包含部署包（README · 2026-10-02 · 入口脚本 v3.5 ＋ 补丁构建 v7，包 v3.6）
+# vLLM-SM75 0.1.7 自包含部署包（G292-Z20 / 8 × Tesla T10 / sm_75）
 
-**一句话**：把本文件夹拷到一台 8×T10（SM75）服务器的任意目录，跑一条命令，得到一个带 Web 控制台、
-能自动识别模型量化类型、并默认开好"模型测试"两个功能的 vLLM 推理服务。
+包版本 **v1.0**（2026-10-07）｜对应上游 **vLLM-SM75 0.1.7-beta**（upstream vLLM 0.30.0、Torch 2.13.0+cu129、CUDA 12.9、FlashInfer 0.6.18、Node 22.23.2）
 
-**基线**：SM75 v0.1.6 原始代码线（基座 `vllm/vllm-openai:v0.30.0-cu129`，build commit `ced6857a…`）。
-脚本与配置模板里**不含任何机器专属路径**——适配一律走环境变量覆盖，不改脚本；
-文档中出现的机器型号与日期是实测证据的出处标注（不是脚本依赖，也不是要你照抄的路径）。
+这个包解决一件事：在这台 8 卡 T10 的机器上，把 Flash-Next 27B/48层 MoE 档（TP8＋EP、256K 上下文、FP8 KV、QSA 全开、无 MTP）从"能跑"做到"跑满"，并且**每一步都有可复核的断言**，不留"照着文档跑不通"的坑。
 
-## 先决条件（不满足会在对应步骤停下并告诉你怎么办）
-1. **基座镜像（第一步就会撞上，先看清楚）**：补丁层建在 SM75 v0.1.6 **ultra** 基座之上（约 70G，
-   **本包不含、也不提供下载点**）。三条路：
-   ① 本机已有该镜像或同族标签 → `BASE_IMG=<标签> bash docker/build.sh <cfg>`，或直接
-      `IMAGE=<标签>` 让 start-here 用它（给了 `IMAGE` 时脚本**不代编译**，见"可覆盖项"）；
-   ② 有基座 tar → `docker load -i <基座>.tar`，再打标签 `vllm-sm75-next-ultra-0924:latest`；
-   ③ 用包内 `code/VLLM-SM75-main0.16/` 现建 → `BOOTSTRAP=1 bash docker/build.sh <cfg>`
-      （走上游官方链 standard→ultra，需外网、小时级；**本包未实机验证过这条路**）。
-   上游版本与构建说明见 `code/VLLM-SM75-main0.16/README.md` 与 `code/VLLM-SM75-main0.16/docs/releases/v0.1.6.md`。
-   **层 3/层 4 的额外前提**：这两层动的是基座内的 `vllm/models/qwen4_exp/nvidia/ngram_embedding.py`。
-   基座里没有该文件时，层 3 会以 `PLE_AWQ_RESOLVE_FAIL` 停下并打印解释器诊断（v3.6 起，退出码 3）——
-   那是基座不对，不是补丁坏了。包内 `code/` 是 321 个文件的 overlay 树、**不含** `qwen4_exp`，
-   所以路③能否产出该目录本包未验证；**确定能跑到层 3 的只有路① 和路②**。
-2. **硬件验证配置**：总显存 ≥128G 且宿主内存 ≥128G（硬门槛 `REQ_VRAM_G`/`REQ_RAM_G`；
-   `env-check.sh` 另有内存 <180G 的 WARN 档——engram cpu_offload 实测占约 96G，128G 能跑但没余量）（G292-Z20 8×T10 16G＋252G 实测跑通；
-   engram n-gram 表单独占约 95-96G 宿主内存）。低于会问你是否强制继续。
-3. **环境检测三档**：OK/WARN 可继续；INCOMPAT（驱动<570、卡数≠8、sm≠7.5、单卡≠16384MiB、
-   缺 nvidia-container-toolkit）停下问 FORCE；硬缺（docker 守护进程/nvidia-smi/curl）直接退。
-4. 模型卡上的小卡 offload 标签（rtx-3090/single-gpu/24gb-vram 等）属**另一个推理栈**的宣传，本包不支持也不验证。
+---
 
-## 包里有什么
-| 路径 | 内容 |
-|---|---|
-| `code/VLLM-SM75-main0.16/` | v0.1.6 源码树（含官方 docker/ultra 构建链，供 BOOTSTRAP） |
-| `docker/` | 补丁层构建（层1 console-patched → 层2 nvapi → 层3 awqple → 层4 incple，层4 可选）＋层3 的 `patch_ple_awq.py`（构建时对 `ngram_embedding.py` 打补丁）＋层4 的整文件替换件 `ngram_embedding.incple-1938b4aa.py`＋`libnvidia-api.so.1`（sha `4a199f9b…1d8c`，与驱动 580.173.02 配套）＋`NVAPI-获取说明-v1.md`（换驱动/缺件时的重新获取与降级路）；另有 `Dockerfile.monitorfix`（控制台监控开关的一层，默认不建，见 CHANGELOG） |
-| `run/start-here.sh` | **现行入口 v3.5**：环境检测 → 1Panel 式交互 → 模型后台下载编排 → 判别 → 后台编译＋并行 P2P → 值守 → 起容器 → 建档启动 → 开测速两功能 → 打印凭据 |
-| `run/env-check.sh` | 只读环境检测 v4（参考环境内置、国内优先、三档判定） |
-| `run/profiles/*.json` | 三套档模板：auto-round(incple)／compressed-tensors(awq)／无量化(base) |
-| `tools/p2p-suite-run-v3.sh` | P2P/NCCL 七件套非交互运行器＋机器可读判读（退出码 0/3/6/7/8/9；判读同时落进日志） |
-| `tools/g292z20-nccl-tests/` | 七件套本体（可达矩阵/NCCL allreduce/1GiB 单双向/多流/诊断） |
-| `tools/download-model-v3.sh` | 模型下载器（hf-mirror 默认、后台＋续传＋分片自验、`--probe`/`--verify` 单测口） |
-| `CHANGELOG.md` | 历代修订清单（v1.1 → v3.5，每轮 review／实机模拟发现的问题与修法） |
-| `LICENSE`／`NOTICE` | Apache-2.0；NOTICE 说明随附源码树与 `libnvidia-api.so.1`（NVIDIA 驱动组件，另受其自身条款）的出处 |
-| `.gitattributes` | 强制 LF／二进制不转换——Windows 上 clone 后 `sha256sum -c` 才会不飘红 |
-| `Dockerfile.monitorfix` | 额外一层：控制台强制 `VLLM_MONITOR=1` 的开关补丁；`build.sh` **不建它**，需要时手动 build（见 CHANGELOG"不在发布范围内的东西"） |
-| 历代脚本与过程件 | **不在本仓**：v1/v2 的下载器与 P2P 运行器带实证 bug（v1 还把输入拼进 `bash -c` 字符串），只在工作目录留档。仓里只有当前号，要历史翻 git 提交 |
-| `部署文档-v1.md`、`基线与口径说明-v1.md` | 逐步部署/手动等价命令/验收清单/故障表/回滚；基线三要素与口径红线 |
-| `SHA256SUMS.txt` | 全包校验（Linux 下 `sha256sum -c` rc=0；`run/*.log` 为运行产物不入清单） |
+## 一、先看实测效果
 
-## 三步上手
+同一台机、同一个 profile、同一把尺（Ultra 控制台自带「模型测试」，llm_speedtest 扩展 commit `eb19940`，并发 1、超时 30 s），唯一差别是镜像多了一层 FlashInfer PCIe-IPC 回填＋一个环境变量。
+
+基线（后端 FIREFLY_AR，2026-10-07 14:0x，5 个提示词长度 512→8192）：
+
+![基线 FIREFLY_AR](docs/bench/20261007-baseline-firefly-ar.png)
+
+生产档（后端 FLASHINFER_PCIE_IPC，2026-10-07 14:3x，9 个长度 512→131072）：
+
+![生产档 PCIe-IPC](docs/bench/20261007-pcieipc-production.png)
+
+| 指标 | 基线 FIREFLY_AR（5 档） | 生产档 PCIe-IPC | 变化（同长度逐档配对） |
+|---|---|---|---|
+| ITL（步时） | 22.89–23.25 ms | **17.22–17.61 ms** | 每步省 ≈5.5 ms |
+| 输出 tok/s | 43.15–43.95 | **57.03–58.36**（均值 57.73） | **＋30.5%～＋33.1%** |
+| 预填充 tok/s | 2518.29–3105.99 | 2531.33–3117.93 | ＋0.4%～＋1.0%（噪声内） |
+| TTFT | 196.26 / 408.42 / 703.11 / 1334.89 / 2639.60 | 195.08 / 406.79 / 696.85 / 1328.91 / 2629.77 | −0.4% |
+
+可比长度只有 512–8192 这五档（基线那批只跑了 5 个长度，16384 以上是新加的档，不参与配对差）；
+逐档配对的输出吞吐增幅依次是 512→＋32.1%、1024→＋33.1%、2048→＋31.6%、4096→＋32.8%、8192→＋30.5%。
+
+用官方随包尺子（源码树 tools 目录里的 benchmark_flash_next.py）复核过 8K 档：decode 中位 44.55 → **58.01**（n=7，区间 57.72–58.61，＋30.2%），prefill 3215.44 → 3214.54（−0.03%），`passed=true`、零抢占、零缓存命中、无投机。
+两批数据的完整九行表与判读见 **`docs/实测-面板测速对照-v1.md`**。
+
+**为什么不是"提频"或"解锁功率墙"**：两次 SM 时钟都是 1590 MHz（T10 跑满档），单卡功耗从约 90 W 升到约 118 W，而每 token 能量几乎不变（2.06 → 2.03 J，**这两个数是"功耗 ÷ 吞吐"算出来的计算值、不是仪器实测**）⇒ 功耗上涨完全由"每秒多做 31% 的步"解释。省下来的 5.5 ms 与上下文长度无关，正是"每步一次 allreduce"的形状。
+基线那侧的单卡功耗来自 2026-10-07 面板性能监控页的逐卡读数 87.8–92.5 W（同页作废过一个"八卡合计 89 W"的旧采样，那是 awk 读错列，两者不是一回事，别混引）。
+
+---
+
+## 二、五步上手
+
+前提二选一，否则第 1 步走不通：手上已有官方层0 标签 `vllm-sm75:v0.1.7-ultra-beta`，
+或者备一份 0.1.7 源码树并用 `SM75_SRC=/路径` 指过去（**本包不随附源码树**，`docker/build.sh` 只会调官方的构建入口）。
+
 ```bash
-cd <包>/run
-bash start-here.sh            # 交互；所有可选项给【默认值】，回车即采用
-# 单步：MODE=env|detect|p2p|dlprobe|full（默认 full）
-# 免交互（无人值守）：把要用的值都用 env 给出，并把 stdin 关掉，每个问句自动取默认值
-#   export MODEL_DIR=/绝对/路径/模型目录     # 免交互必给；不给且没模型时会走"下载"默认值
-#   export MMBT=4096 UTIL=0.90 DATA_DIR=/data/vllm-console
-#   MODE=full bash start-here.sh < /dev/null
-# 结束后按屏幕提示，把 控制台token 与 引擎APIkey 抄走备份（容器内 /console-data/key 与 engine-key.current）
-# 跑过的目录含 console-data/（凭据）与 run/*.log：不要整体 git 提交或打包外发（.gitignore 已挡住这些）
-```
-没有模型时脚本会问"要不要后台下载推荐模型 `albucino/Qwen3.8-Flash-Next-W4A16-FP8PLE`"（约 120GiB、27 分片、
-非 gated 无需 token、国内走 hf-mirror.com）；要就 nohup 起下载、前台继续，起引擎前值守下完并重跑分片门禁。
+# 1) 构建镜像（层0 官方 ultra → 层1 GPU 探测超时 20s → 层2 PCIe-IPC 回填）
+bash docker/build.sh                       # 已有官方基座时它只补层1、层2
+SM75_SRC=/path/VLLM-SM75-0.1.7-beta bash docker/build.sh    # 没有基座时：指源码树，层0 由官方入口建
 
-## 模型配置判别（离线单测六例＋控制台 validateProfile 三模板全过）
-| `config.json` 的 `quantization_config.quant_method` | 选用 | 镜像 |
+# 2) 环境体检 + 起容器（路径用同名环境变量覆盖，绝不写死在脚本里）
+bash run/env-check-v1.sh /path/to/model-dir          # 有 BLOCK 就非零退出（4），别跳过
+DATA=/path/to/console-data MODELS=/path/to/model-dir \
+  bash run/start-here-v1.sh --dry-run                # 先看组装出来的 docker run（零副作用）
+DATA=/path/to/console-data MODELS=/path/to/model-dir \
+  bash run/start-here-v1.sh                          # 门禁全 PASS 才真起
+# NVAPI 默认直接吃包内 docker/libnvidia-api.so.1（sha 门现成能过），不用你手工摆到 $DATA 下；
+# 想用自己取的那份就显式传 NVAPI=/你的路径。
+
+# 3) 注册权重并从官方模板建档（引擎不会自起，档也不会自己长出来）
+docker exec <容器> node /console-data/tmp/console-driver-v1.cjs setup   # 输出 PROFILE_ID=…
+#    这一步等价于在面板里"注册权重目录 ＋ 选官方模板"；只想看一眼现有档就跑 probe
+
+# 4) 给档加那个环境变量（不加就还是 FIREFLY_AR，＋31% 拿不到；引擎在跑时工具会拒绝，先停）
+docker exec <容器> node /console-data/tmp/console-edit-profile-v1.cjs <profileId> \
+  setenv VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC 1
+#    也可以直接用包里的推荐档模板 run/profiles/flash-next-tp8-256k-nomtp-pcieipc.json
+#    （它＝官方档 ＋ 那一条 env；两份的差集只有 id、name 两个标识 ＋ 那一条 env）
+
+# 5) 起引擎并复验签名（面板点「启动」，或命令行）
+docker exec <容器> node /console-data/tmp/console-driver-v1.cjs probe      # profileId 现取
+docker exec <容器> node /console-data/tmp/console-driver-v1.cjs start <profileId>
+docker exec <容器> node /console-data/tmp/console-driver-v1.cjs status <profileId>
+```
+
+`tools/panel/` 那两个 `.cjs` 是面板的命令行驱动，`start-here-v1.sh` 会把它们拷到 `$DATA/tmp/`（= 容器内 `/console-data/tmp/`）。**不随包发就等于让复刻的人只能去网页上手点**，所以这一步是发布阻塞项。
+
+判成功的终态（不是"命令 rc=0"）：
+
+- 引擎日志里 `Using ['FLASHINFER_PCIE_IPC', 'FIREFLY_AR', 'PYNCCL'] … for group 'tp:0'` —— 后端进了**第一位**；
+- 有 `Initialized FlashInfer PCIe IPC all-reduce`，且**没有** `does not provide PcieIpcAllReduceWorkspace`；
+- `GPU KV cache size: 339,110 tokens`、`FP8 layout verified` 恰好 **96 条**（12 个 full_attention 层 × 8 worker）、`backend=p2p` 8 条、无 `Traceback`。
+
+---
+
+## 三、包里有什么
+
+```
+README.md                        本文件
+部署文档-v1.md                    逐步操作与判据
+基线与口径说明-v1.md               基线值、本机漂移项、测速口径红线
+CHANGELOG.md                     版本沿革（这个包是 v1.0，对应上游 0.1.7-beta）
+LICENSE  NOTICE  SHA256SUMS.txt
+run/
+  start-here-v1.sh               唯一启动入口（含共存门、端口门、终态断言）
+  env-check-v1.sh                硬件/驱动/磁盘/内存/权重/拓扑体检（有 BLOCK 非零退出）
+  profiles/flash-next-tp8-256k-nomtp.json               官方 0.1.7 模板原样（默认值＝基线）
+  profiles/flash-next-tp8-256k-nomtp-pcieipc.json       推荐档＝官方模板＋那一条 env（差的就那一行）
+docker/
+  build.sh                       唯一构建入口（三层，任一层可跳；SKIP_NVAPI/SKIP_PCIEIPC 是真开关）
+  Dockerfile.to20s-v1  to20s-patch-v2.sh    层1：面板 GPU 探测超时 3s→20s
+  Dockerfile.pcieipc-v1                     层2：PCIe-IPC 回填层
+  pcieipc/                                  回填物料：6 个新文件＋3 个追加块＋manifest＋门禁脚本＋解包器
+  libnvidia-api.so.1  NVAPI-获取说明-v1.md  P-State 需要的宿主库（只读 bind，不烘进镜像）
+tools/
+  panel/console-driver-v1.cjs               面板命令行驱动（probe/setup/start/stop/status/engineenv）
+  panel/console-edit-profile-v1.cjs         带护栏地改档（setenv/rmenv/setarg，逐项比对＋异常回滚）
+  flash-next-tested.sha256  sha256-weights-v1.sh   权重全量校验（34 项＝15 主＋10 plefp8＋9 其它）
+  gen-console-env-v1.sh                             把在役容器 env 落成宿主 600 文件
+  bench-official-v1.sh                              官方随包尺子的封装（口径钉死＋可比性判定）
+  lint-package-v1.sh                                出厂自检（语法/行尾/反泄露/断链/清单/COPY 自洽）
+                                                  ↑ 需要一份**仓库之外**的身份清单：PRIVACY_PATTERNS=/你的路径
+                                                    没有它这脚本直接判 FAIL——那是有意的（防止把真实姓名/用户名/
+                                                    宿主路径带进公开仓），clone 下来想跑自检得自己准备那份文件
+docs/                             实测对照与截图、给他人 AI 的自包含提示词
+```
+
+---
+
+## 四、默认值与四处破例（必须读）
+
+包内 profile 模板是**官方 0.1.7 档原样**（MMBT 4096、util 0.92、`--kv-cache-memory-bytes 2415919104`、`--block-size 16`、`qwen3_xml`、`--compilation-config PIECEWISE`、QSA 一组 env），遵循"分享包默认值锁原始基线"的规矩；我们这台机的差异只写进 `基线与口径说明-v1.md` 的漂移项，不改包内默认。
+
+端口也一样：`API_PORT` 默认 **8000**（官方文档口径），我们本机用的 18001 是漂移项，不默认发出去。
+
+**四处破例**（都写在这里，别假装没有）：
+
+1. `run/profiles/flash-next-tp8-256k-nomtp-pcieipc.json` 是"官方模板＋`VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC=1`"的推荐档；官方原样那份仍是基线，两份的差集只有三行：`id` 与 `name` 两个标识 ＋ 那一条 env。发它的原因是：光有镜像那一层、档里不置这个变量，vLLM 默认不启用该后端，+31% 拿不到。
+2. `docker/build.sh` 默认会产出并推荐带 PCIe-IPC 回填层的镜像。理由是该增益在这台机上量级明确（decode ＋30.5%～＋33.1%）且可一键退回。请知悉三点：
+   1. 这层是**我们自维护**的：把 FlashInfer 0.7.0.post1 里的 6 个文件与 3 处导出补进已装的 0.6.18，**不升级 FlashInfer、不动 attention 内核与 cubin**。官方产物点不亮这个后端（官方镜像同样钉 0.6.18）。
+   2. 退回官方形态只要一条命令：`SKIP_PCIEIPC=1 bash docker/build.sh`，或启动时不置 `VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC`（也别用上面那份推荐档）。
+   3. 上游 FlashInfer 一旦带上 `PcieIpcAllReduceWorkspace`（0.7 起自带），**这层应当撤除**，不要长期叠加。
+3. **`--restart no`**（官方文档示例里有 `unless-stopped` 的写法）。理由：生产惯例——开机不自起、不自起抢卡；
+   这台机上引擎是"用完即停"的，自起会在开机时和别的容器抢八卡。要常驻服务就自己显式改 `RESTART=`。
+4. **四条缓存 bind**（`.cache`/`.triton`/`.nv`/`.tilelang`），比官方示例多一条 `.tilelang`。
+   理由：`docker diff` 实测它落在容器可写层，重建容器就重付一次编译费。少一条的表现不是报错而是"启动变慢几分钟"。
+
+---
+
+## 五、基线前提
+
+| 项 | 要求 | 说明 |
 |---|---|---|
-| `auto-round`（或 `packing_format=auto_round:*`） | incple 档 | `…:patched-nvapi-awqple-incple` |
-| `compressed-tensors` / `awq` / `gptq` | awq 档 | `…:patched-nvapi-awqple` |
-| 无量化配置 | base 档 | `…:patched-nvapi-awqple` |
-| `config.json` 还读不到（正在下载） | **pending**：先按 incple 备镜像，下载完成后重新判别再定档 | 先 `…-incple`，复核后按实际 |
-| 其它（如 bitsandbytes） | **停下，人工确认** | — |
+| GPU | 8 × Tesla T10（sm_75，16 GiB），纯 PCIe 无 NVLink | 其他 sm_75 卡需重测常量 |
+| 驱动 / CUDA | ≥ 570，CUDA 12.9 | 引擎内 CUDA，不依赖宿主 toolkit |
+| 宿主内存 | 总内存 ≥ 128 GiB；**可用** ≥ 110 GiB（`env-check` 的门），容器内存上限按官方文档 112 GiB | 权重加载峰值实测 110.7/112 GiB，**别调低** |
+| 磁盘 | 权重约 120–124 GiB（按修订版本）；根盘余量 ≥ 40 GiB | 大构建前先现采 `df`；`$DATA`/`$CACHE` 在别的盘时那一盘的余量也一起看 |
+| 权重 | 官方 tested 修订（`tools/flash-next-tested.sha256` 34 项全对＝15 主分片＋10 plefp8＋9 其它） | 权重不同则所有数字不可与本包对照 |
+| 面板两处必修 | ① GPU 探测超时 3s→20s；② NVAPI 只读 bind | 缺①面板报「无法读取 GPU 状态」HTTP 400 拒启；缺②面板拒绝启引擎 |
 
-分片门禁只拦"index 里有张量映射但盘上缺文件"；**index 零映射的编号空位（如 AutoRound 官方包的
-`model-00002-of-00017`）不算缺件，放行**——实测过的上游打包形态。
+---
 
-## 可覆盖项（都不用改脚本）
-`MODEL_DIR DATA_DIR CACHE_SRC NAME CONSOLE_PORT ENGINE_PORT IMAGE SERVED_NAME MMBT UTIL REQ_VRAM_G REQ_RAM_G
-BIND_HOST PROBE_HOST SHM_SIZE MNT_MODEL SM75_CONSOLE_ROOT PYBIN FORCE`
-- 编译侧：`BASE_IMG BOOTSTRAP SKIP_NVAPI MID_TAG OUT_TAG OUT2_TAG OUT3_TAG`
-- 下载侧：`REC_REPO REPO DEST HF_ENDPOINT HF_RUNNER_IMG PYIN_IMG REVISION HF_VERSION`
-- P2P 侧：`TORCH_IMG SUITE OUT PARSE_ONLY P2P_FLOOR_GBPS NCCL_FLOOR_GBPS NCCL_DEBUG`
-- `FORCE=1`：环境判定 INCOMPAT 时免交互强继续（无人值守要用它；问句默认方向是"不继续"）。
-- `SKIP_NVAPI=1`：层 2 不装 `libnvidia-api.so.1`（该文件是 NVIDIA 驱动组件），代价是 P-State 电源管理不可用、
-  档模板 `power.mode` 必须是 `sleep`。
-- `IMAGE=` 只决定"用哪个镜像"，**不决定编译产物叫什么**：产物标签由 `BASE_IMG`/`OUT*_TAG` 控制；
-  给了 `IMAGE` 而本机没这个镜像时脚本直接停下，不会替你编一个名字不对的镜像。
-- 单跑下载器要显式给目录：`DEST=/绝对/模型目录 bash tools/download-model-v3.sh --verify`。
-- `CACHE_SRC` 挂到容器内 `$SM75_CONSOLE_ROOT/cache`（单容器 native 形态下这才是真生效的编译缓存根）。
-- `--served-model-name` 在 vLLM 0.30 是多值参数：模板里主名后还带一个 `Flash-Next-AWQ` **别名**，
-  `/v1/models` 会列两个名字；不想要别名就删模板 `args` 里那一项。
-- 档内其余参数建好后在控制台改（运行中改档会被拒，先停止）。
+## 六、已知坑（我们都踩过，写在这里省你时间）
 
-## 校验与运行环境
+1. **别整体升级到 FlashInfer 0.7**。官方镜像钉 0.6.18 有明确理由（AOT cubins 不含 SM75 会让 BatchPrefill 在图预热时失败），升版本面太大。回填只动 9 个文件。
+2. **追加块的验收不能用"某字符串出现一次"计数**。`comm/__init__.py` 里同一句 import 本来出现 3 次，计数断言会把好构建判成失败。正确判据是"目标文件必须以该块内容逐字结尾"（`docker/pcieipc/gate-check-v3.py` 就是这么做的）。
+3. **`pcie_ipc_all_reduce_trace` 依赖同文件两个辅助函数**。只抄 `TraceTemplate(...)` 赋值那句，`import flashinfer` 会直接 NameError，整条推理路径当场死。
+4. **判"某符号在不在"要用 AST 收全部顶层绑定**。`register_custom_op` 藏在 `utils.py` 的 if/else 两分支里、`autotuner` 是包目录不是文件——按文本或按 `.py` 路径去找都会误报"缺失"，进而多补砖头。
+5. **直接 `docker run 镜像 vllm serve …` 会被吞**。派生镜像继承的是 node 控制台 entrypoint，必须显式 `--entrypoint`。任何要等十分钟以上的动作，前面加一条 30–90 秒的"形状自检"（起格后必须看到目标进程）。
+6. **JIT 缓存要挂到宿主**。首次启用该后端会现场 nvcc 编译（本机冷缓存实测 9.1 秒，不用预留几分钟），但 `/root/.cache`、`/root/.triton`、`/root/.nv`、`/root/.tilelang` 四条 bind 少一条，重建容器就重付编译费。`/root/.tilelang` 尤其容易漏（它不在常见三条里）。
+7. **`docker diff` 查可写层比"我设过 env 了"可靠**。缓存类 env 设了不等于落在持久化目录里，验收要看 diff 还有没有新增。
+8. **面板 profile 日志跨次追加**。任何计数类判据（FP8 layout 96、p2p 8）必须只取本次启动新增的字节切片，否则会翻倍。
+9. **端口默认只绑 127.0.0.1**。要局域网访问得显式 `BIND_HOST=0.0.0.0` 重跑，并且自己加上鉴权（档里给引擎配 `--api-key`，或前置反代）——本包不会替你把无鉴权的推理端口发到公网上。
+10. **env 覆盖口用分号不用逗号**。`BOOTSTRAP_ENV` 里 `PSTATE_GPUS=0,1,2,3,4,5,6,7` 这种含逗号的值是常态，拿逗号当分隔符会把值切碎，碎出来的 `-e 1` 变成"透传宿主变量 1"＝静默丢值。脚本切完还逐片验形状，不合规直接 BLOCK。
+11. **`MODELS` 挂哪一层要跟 profile 的 `defaultModel` 对齐**。包内官方档写的是 `/models/Qwen3.8-Flash-Next-W4A16-FP8PLE`（父目录挂法）；把**模型目录本身**挂成 `/models`（我们生产即此形态）时，注册权重后面板会用 `${MODEL}` 填 argv[0]，但 `defaultModel` 那个显示值指不到——表现是"面板看得见模型、点启动起不来"。启动入口两种挂法都认（门禁会在两种之一 PASS），但注册路径与 `defaultModel` 得你自己对齐。
+
+---
+
+## 七、撤除与回滚
+
 ```bash
-cd <包> && sha256sum -c SHA256SUMS.txt            # 应全 OK、rc=0
-bash tools/download-model-v3.sh --verify-sha      # 可选：按站点 LFS oid 逐片比权重 sha256（要读完 120GiB）
+# 撤回填层（保留 20s 层）
+SKIP_PCIEIPC=1 bash docker/build.sh
+# 撤 profile 里那个变量（工具会逐字段＋逐 argv 位比对，异常自动回滚）
+docker exec <容器> node /console-data/tmp/console-edit-profile-v1.cjs <profileId> \
+  rmenv VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC
 ```
-- **脚本只能在 Linux 宿主上跑**（依赖 `/proc/meminfo`、`df --output`、`hostname -I`、docker/nvidia-smi）；
-  Windows 的 Git Bash / WSL 只适合做静态检查，不要在那里跑 `start-here.sh`。
-- LF 的保证只对 `git clone` 有效（`.gitattributes`）；用 zip/网盘分发时收方先 `sha256sum -c SHA256SUMS.txt`，
-  飘红说明被换行改过，改用 git 取回或先 `dos2unix`。
-- **没有密码学校验的三处**：可变镜像 tag、`docker load` 进来的基座 tar（本包不带也无从给哈希）、
-  slim runner 里的 `pip install -U huggingface_hub`（不钉版本、不锁 index）。要可复现就用
-  digest 形式传给 `TORCH_IMG=` / `HF_RUNNER_IMG=` / `BASE_IMG=`，下载可用 `REVISION=` 钉仓库修订、
-  `HF_VERSION=` 钉依赖版本。本包不内置任何 digest/版本号（未核实的数字不写进默认值）。
 
-## 红线与已知边界（详情见 部署文档-v1.md）
-- 选择题／loglikelihood 类评测（prompt_logprobs）**会打死引擎**，本包路线只用 humaneval＋gsm8k。
-- 吞吐数字带工况：功耗窗与 persistence 状态每次开测前先查 `nvidia-smi -q -d POWER`。
-- LiveCodeBench 在"思考常开×固定小 max_tokens"端点**不可比**；公开卡片分数只作外部参考值。
-- incple 档模板 `--max-num-batched-tokens=2048` 已在 AutoRound 权重上验证可用（2026-10-01 全流程跑通）；
-  实测口径（用户 2026-10-01）：2048 预填充峰值吞吐约 3000 t/s；**4096 也已验证**（前一晚数小时长程任务稳定，峰值 3200+ t/s）；
-  再大（如 8192）有 OOM 风险。默认保持 2048 止血基线，追求 prefill 速度可放心用 4096。
-- 从控制台镜像派生的新镜像**继承 node entrypoint**：要直接 `docker run <镜像> vllm serve …` 必须加
-  `--entrypoint /usr/local/bin/vllm`，否则起的是第二个控制台。
-- 本脚本**不删除任何容器**：同名在跑或同名已停都会停下让你自行 stop/rename。
+启动入口自带共存门：**同一份 `/console-data` 只允许一个控制台实例使用**（否则 `profiles.json` 会被整体重写覆盖），端口被占、八卡未空、NVAPI 哈希不符都会直接拦下；**门禁没过时脚本一次写操作都不做**（不建目录、不 chmod、不拷文件、不起容器），`--dry-run` 更是全程只读。
+同名容器不会被自动删——要复用名字就自己 `docker rm`，或换个 `NAME=`。
+
+不用 P-State 托管（不想带那个 NVIDIA 库）就两处一起改：`SKIP_NVAPI=1 bash docker/build.sh` ＋ `NVAPI=none bash run/start-here-v1.sh`，并把档里 `power.mode` 从 `pstate` 改成 `sleep`。只改一处会出现"构建过了、面板拒启"。
+
+---
+
+## 八、许可与第三方二进制
+
+代码部分沿用上游许可（见 `LICENSE` 与 `NOTICE`）。`docker/libnvidia-api.so.1` 是 NVIDIA 驱动侧运行库，仅为让 P-State 托管在这台机上可用而随包附送（sha256 `4a199f9b…131d8c`，720104 字节，驱动 580.173.02）；它**不烘进镜像**，是宿主侧只读 bind。不需要 P-State 就按 `docker/NVAPI-获取说明-v1.md` 走 sleep 退路（`SKIP_NVAPI=1` ＋ `NVAPI=none`）。
+包内**不含任何凭据**：登录 token 与引擎 API key 都在运行时生成、落在 `$DATA`（脚本会 `chmod 700`），不要外发那个目录。`tools/panel/*.cjs` 读 token 只进请求头，任何输出都把含 key/token/secret 的名字脱敏。

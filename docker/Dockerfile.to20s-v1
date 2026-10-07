@@ -1,0 +1,22 @@
+# Dockerfile.to20s-v3 — 只改一处：控制台探测 hardware.py 的超时 3s → 20s
+# 版本沿革：
+#   v1 废弃：断言内联进 RUN 并依赖 $$ 转义 ⇒ dash 收到字面 "$$"（进程号）后接括号，构建报
+#     /bin/sh: Syntax error: "(" unexpected。
+#   v2 废弃：断言脚本用 grep -c 'timeout: 3000' 计数，把第 582 行 'timeout: 30000' 当前缀误计，
+#     "仅 1 处"与"残留为 0"两处断言必然假失败（复核拦截，未上机）。
+#   v3：COPY 外置断言脚本 to20s-patch-v2.sh（匹配收紧 + 不误伤其它超时值），Dockerfile 只留一行 RUN。
+#
+# 为什么需要这层：本机 `python3 hardware.py` 实测 6.0–6.9 秒（八卡 NVML＋PCIe 计数），
+#   官方 server.mjs:314 写死 timeout: 3000 ⇒ gpu() 返回空 ⇒ switch-model.mjs:5 抛
+#   「无法读取 GPU 状态，未启动模型」(HTTP 400)，面板启动不了引擎，硬件页显示 0 卡。
+# 纪律：官方产物 vllm-sm75:v0.1.7-ultra-beta 原样保留，改动只活在派生标签 ...-to20s，可整层回滚。
+ARG BASE_IMAGE=vllm-sm75:v0.1.7-ultra-beta
+FROM ${BASE_IMAGE}
+
+COPY to20s-patch-v2.sh /tmp/to20s-patch.sh
+RUN sh /tmp/to20s-patch.sh && rm -f /tmp/to20s-patch.sh
+
+LABEL sm75.localpatch="gpu-probe-timeout-3s-to-20s" \
+      sm75.localpatch.line="314" \
+      sm75.localpatch.base="vllm-sm75:v0.1.7-ultra-beta" \
+      sm75.localpatch.reason="hardware.py takes 6.0-6.9s on 8xTesla T10 (G292-Z20); the stock 3000ms gate blocks panel engine start"

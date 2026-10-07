@@ -1,0 +1,10 @@
+# install.sh 逐条核验：0.6.18 既有模块必须提供这些顶层名字（目标相对 flashinfer 包根）
+# 列: 引用方 <TAB> 目标模块 <TAB> 逗号分隔的名字
+comm/pcie_ipc_ar.py	api_logging	flashinfer_api
+comm/pcie_ipc_ar.py	autotuner	AutoTuner,autotune,get_autotune_process_group,set_autotune_process_group
+comm/pcie_ipc_ar.py	comm/cuda_ipc	create_shared_buffer,free_shared_buffer
+comm/pcie_ipc_ar.py	jit/comm	gen_pcie_ipc_comm_module
+comm/pcie_ipc_ar.py	trace/templates/comm	pcie_ipc_all_reduce_trace
+comm/pcie_ipc_ar.py	utils	register_custom_op
+comm/pcie_ipc_tuning.py	autotuner	AutoTuner,DynamicTensorSpec,TunableRunner,TuningConfig,get_autotune_process_group,make_bucket_mapper
+comm/pcie_ipc_tuning.py	jit/env	FLASHINFER_WORKSPACE_DIR

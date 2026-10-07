@@ -1,32 +1,73 @@
-Copyright 2026 SM75 v0.1.6 自包含部署包 contributors
+Copyright 2026 vLLM-SM75 0.1.7 自包含部署包 (self-contained deployment package) contributors
 
-This product bundles and extends the following third-party / upstream work:
+This package is a set of deployment scripts, one image patch layer and one library
+backport. It is NOT a fork of vLLM and it ships no vLLM source tree.
 
-1. vLLM-SM75 v0.1.6  (source tree shipped at code/VLLM-SM75-main0.16/)
-   Copyright of the vLLM-SM75 authors; licensed under the Apache License, Version 2.0.
-   That tree itself is an adaptation of vLLM 0.30.0 (Apache License, Version 2.0)
-   for NVIDIA Turing / SM75 devices.  See code/VLLM-SM75-main0.16/LICENSE and
-   code/VLLM-SM75-main0.16/README.md for the upstream notice and release notes.
+It bundles, references, or extends the following third-party / upstream work:
 
-2. Deployment scripts, patches and P2P/NCCL test suite in docker/, run/ and tools/
-   are original to this package and are distributed under the same Apache License,
-   Version 2.0 as the bundled source tree (see LICENSE at the repository root).
+1. vLLM-SM75 0.1.7-beta  (upstream vLLM 0.30.0, commit ced6857afa0ea7b2e3f0846a62e1394e90f15607)
+   Copyright of the vLLM-SM75 / vLLM authors; licensed under the Apache License,
+   Version 2.0.  The source tree is provided by You (set SM75_SRC= ... ); this package
+   only calls the upstream docker/build.sh to produce the base image
+   vllm-sm75:v0.1.7-ultra-beta.  Nothing from that tree is redistributed here.
 
-3. docker/libnvidia-api.so.1 is NOT original work.  It is a component that ships with
-   the NVIDIA display driver (tested with driver 580.173.02).  It is included in this
-   repository purely so the P-State power-management layer can be built offline; that
-   is a practical choice by this repository's publisher, not a licence grant.  It remains governed by the NVIDIA driver license, not by the Apache
-   License above, and this project makes no claim that the NVIDIA license permits
-   redistribution by third parties.  If you would rather not carry the binary: delete
-   the file and build with SKIP_NVAPI=1 (docker/build.sh) - inference still works,
-   only P-State power management is unavailable.  Its integrity is pinned by sha256
+2. Deployment scripts in docker/, run/ and tools/, and the docs/ write-ups,
+   are original to this package and are distributed under the Apache License,
+   Version 2.0 (see LICENSE at the repository root).
+
+3. FlashInfer 0.6.18 / 0.7.0.post1  (Apache License, Version 2.0;
+   "Copyright (c) 2026 by FlashInfer team")
+   docker/pcieipc/ contains a self-maintained backport layer: 6 files copied byte for
+   byte out of the flashinfer_python 0.7.0.post1 wheel
+   (sha256 c7adf826568d61fc1b7d3aadd4cae387a35a138bfc08e2deca2f34ecfa280716,
+   https://pypi.org/project/flashinfer-python/0.7.0.post1/), plus 3 verbatim excerpts
+   appended to files that already exist in the installed 0.6.18:
+
+     newfiles/flashinfer/comm/pcie_ipc_{ar,policy,topology,tuning}.py
+     newfiles/flashinfer/data/csrc/pcie_ipc_all_reduce.cu
+     newfiles/flashinfer/data/include/flashinfer/comm/pcie_ipc_all_reduce.cuh
+     append/jit_comm.txt      -> flashinfer/jit/comm.py
+     append/trace_comm.txt    -> flashinfer/trace/templates/comm.py
+     append/comm_init.txt     -> flashinfer/comm/__init__.py
+
+   The 6 full files retain their upstream copyright headers unchanged.  The 3 append
+   blocks are excerpts, so they carry no header of their own; this notice is the
+   attribution required by Apache-2.0 Section 4(c), and every one of the 9 artifacts is
+   pinned by sha256 in docker/pcieipc/manifest.txt and re-checked at build time by
+   docker/pcieipc/install-pcieipc.sh and docker/pcieipc/gate-check-v3.py.
+   These files are ADDED, no upstream line is edited, and no vLLM file is touched.
+   This layer is not an upstream FlashInfer release and not an official capability.
+
+4. Modified console file (Apache-2.0 Section 4(b) notice)
+   docker/Dockerfile.to20s-v1 + docker/to20s-patch-v2.sh change exactly one line of
+   server.mjs, a file belonging to the upstream console (/opt/sm75-workbench/console),
+   from "timeout: 3000" to "timeout: 20000".  That modification is recorded as an image
+   label (sm75.localpatch=gpu-probe-timeout-3s-to-20s), printed as BEFORE_SHA/AFTER_SHA
+   by the patch script, and asserted again after the build.  The upstream base image
+   tags are never overwritten.
+
+5. docker/libnvidia-api.so.1 is NOT original work.  It is a component that ships with
+   the NVIDIA display driver (tested with driver 580.173.02, 720104 bytes).  It is
+   included in this repository purely so the P-State power management path can be used
+   offline; that is a practical choice by this repository's publisher, not a licence
+   grant.  It remains governed by the NVIDIA driver license, not by the Apache License
+   above, and this project makes no claim that the NVIDIA license permits
+   redistribution by third parties.  In the 0.1.7 line this file is mounted read-only
+   from the host and is never baked into an image.  If you would rather not carry the
+   binary, use the documented way-back:
+     SKIP_NVAPI=1 bash docker/build.sh
+     NVAPI=none   bash run/start-here-v1.sh
+     and set power.mode = sleep in the profile (pstate otherwise makes the console
+     refuse to start the engine).
+   Its integrity is pinned by sha256
    4a199f9b259a1098ab9c01d31c67f882a2531a0fbb9c3595ad3d016c7d131d8c
-   (enforced by docker/Dockerfile.nvapi).  If you would rather not take this copy,
-   delete the file and follow docker/NVAPI-获取说明-v1.md to obtain it from your own
-   driver or an image you already have, or set power.mode = sleep in the profile.
+   (enforced by docker/build.sh and run/start-here-v1.sh).
+   See docker/NVAPI-获取说明-v1.md for how to obtain it from your own driver instead.
 
-4. Model weights are NOT part of this package.  Recommended public checkpoints are
-   third-party quantized releases on Hugging Face; they carry their own licenses and
+6. Model weights are NOT part of this package.  tools/flash-next-tested.sha256 is the
+   official "tested" revision manifest (34 entries: 15 main shards + 10 plefp8 shards +
+   9 other files) used only to verify a copy You already have.  Recommended public
+   checkpoints are third-party quantized releases; they carry their own licenses and
    base-model terms, which you must review before use.
 
 No warranty is provided; see LICENSE Sections 11 and 13.

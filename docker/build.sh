@@ -1,125 +1,158 @@
-#!/usr/bin/env bash
-# BUILD v7（2026-10-02 群友实机反馈）：层 3/层 4 的目标文件路径不再写死
-#   /usr/local/lib/python3.12/dist-packages/…，改为在镜像内问解释器要路径（docker/resolve_vllm_paths.py）。
-#   写死等于把"参考环境＝Ubuntu 24.04 + 系统 pip"这一种布局当成唯一真相，venv/conda/非 3.12 的机器
-#   只会看到一句 FileNotFoundError 而猜不到根因。顺带修掉层 4 的假通过：旧 Dockerfile.incple 用
-#   COPY 直接落到写死路径，目录不存在时 Docker 连目录一起造，于是基座不含 qwen4_exp 也能"构建成功"，
-#   产出一个没人 import 的孤儿文件。现在要求目标已存在（层 3 产物必然在）再覆盖。
-# BUILD v6（2026-10-01 第二轮隔离审查修订 S5：SKIP_NVAPI=1 才让"不带 NVIDIA 专有库也能建"真的可执行
-#   （v5 里层 2 是硬必需，NOTICE 却写着"删掉它也行"——承诺与代码不一致）；跳过时层 2 不建、
-#   $OUT 直接指向层 1 产物，层 3/4 照常，档模板须把 power.mode 改 sleep）
-# BUILD v6（2026-10-01 第二轮隔离审查修订 S5：SKIP_NVAPI=1 才让"不带 NVIDIA 专有库也能建"真的可执行
-#   （v5 里层 2 是硬必需，NOTICE 却写着"删掉它也行"——承诺与代码不一致）；跳过时层 2 不建、
-#   $OUT 直接指向层 1 产物，层 3/4 照常，档模板须把 power.mode 改 sleep）
-# BUILD v5（2026-10-01 三轮隔离审查修订 S1-S4，清单见 CHANGELOG.md）
-#   S1 BOOTSTRAP 块在基座预检之后 → 基座不在时先 exit 4，BOOTSTRAP=1 那条路永远走不到（文档却写着可用）；
-#      现在 BOOTSTRAP 判定提前，只有"非 bootstrap 且基座不在"才停；
-#   S2 层 4 的 INCConfig 校验只是跑一条 grep，结果没人看（set -e 下 rc≠0 会中断，但 0 命中与文件不存在都只表现为
-#      构建失败，报错不指向根因）；v5 显式取计数并断言 >=1，失败时打印实际文件路径；
-#   S3 NVAPI 缺失的提示文案过期：libnvidia-api.so.1 现在**随仓附在 docker/**，不再"公开仓不附文件"；
-#   S4 产物打印补层 4 标签，且 BUILD_DONE 移到全部产物之后（调用方 grep BUILD_DONE 当完成标记，别在它之前 exit）。
-# v4（2026-10-01：层2 缺 libnvidia-api.so.1 时预检并打印获取方法，退出码 4）
-# v3（2026-10-01 二轮 review 修订 B1-B2）
-#   B1 旧版层1 写死 FROM vllm-sm75-next-ultra-0924:latest —— 那是某台机器上的本地标签，新服务器上不存在；
-#      现改 ARG BASE 并在开建前预检；
-#   B2 基座缺失时给两条明路：docker load 基座 tar（包外自带），或 BOOTSTRAP=1 用包内 code/ 源码
-#      走官方链（standard → ultra）现建基座；bootstrap 路径**未在本包验证**（本机基座是既有镜像），只作可选。
-# 补丁层：1 控制台超时 → 2 NVAPI 库 → 3 PLE/AWQ →（可选）4 PLE 的 auto-round/INC 分支
-# 另有 docker/Dockerfile.monitorfix（控制台 VLLM_MONITOR 强制开启的一层），本脚本不建，按需手动建。
-set -euo pipefail
-HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PKG="$(cd -- "$HERE/.." && pwd)"
-CODE="$PKG/code/VLLM-SM75-main0.16"
-BASE_IMG="${BASE_IMG:-vllm-sm75-next-ultra-0924:latest}"
-MID="${MID_TAG:-vllm-sm75-next-ultra-0924:console-patched}"
-OUT="${OUT_TAG:-vllm-sm75-next-ultra-0924:patched-nvapi}"
-OUT2="${OUT2_TAG:-vllm-sm75-next-ultra-0924:patched-nvapi-awqple}"
-OUT3="${OUT3_TAG:-vllm-sm75-next-ultra-0924:patched-nvapi-awqple-incple}"
-CFG="${1:-all}"
-NGRAM_BASE=/usr/local/lib/python3.12/dist-packages/vllm/models/qwen4_exp/nvidia/ngram_embedding.py
-# v7（2026-10-02）：目标路径不再写死 python3.12/dist-packages——那是参考环境（Ubuntu 24.04 + 系统 pip）
-#   那一种布局。改为在镜像内问解释器要路径，解析不出来时打诊断，别让人对着 FileNotFoundError 猜根因。
-resolve_ngram(){ docker run --rm --entrypoint python3 "$1" -c \
-  'import vllm,os;print(os.path.join(os.path.dirname(vllm.__file__),"models","qwen4_exp","nvidia","ngram_embedding.py"))' 2>/dev/null; }
+#!/bin/bash
+# build.sh —— 0.1.7 自包含部署包的镜像构建编排（唯一构建入口）
+#
+# 三层模型（每层独立标签，任一层可跳）：
+#   层 0  官方 0.1.7 ultra          vllm-sm75:v0.1.7-ultra-beta            （由官方 docker/build.sh 产出，或你已有）
+#   层 1  GPU 探测超时 3s→20s       …-to20s                                （本机 hardware.py 实测 6.0-6.9s，不修面板拒启）
+#   层 2  FlashInfer PCIe-IPC 回填  …-to20s-pcieipc                         （默认推荐；SKIP_PCIEIPC=1 退回层 1）
+#   NVAPI **不在任何层里**：0.1.7 的形态是宿主文件只读 bind 进容器（见 NVAPI-获取说明-v1.md）。
+#
+# 用法：
+#   bash build.sh                      # 层0 若已在位则跳过，然后层1、层2
+#   MODE=layers bash build.sh          # 只做层1+层2（要求层0 标签已在位）
+#   SKIP_TO20S=1 bash build.sh         # 只做层2，基座用层0（层2 标签自动叫 …-ultra-beta-pcieipc）
+#   SKIP_PCIEIPC=1 bash build.sh       # 只要官方形态（层0+层1）
+#   SKIP_NVAPI=1 bash build.sh         # 不带 P-State 宿主库也能走完（构建本来不碰它，这里只放行前置门）
+#   OFFICIAL=本地已有标签 MODE=layers bash build.sh    （层0 标签名）
+#   BASE_IMAGE_ID=repo@sha256:<digest>                 （把 FROM 钉到 digest，别只信 tag）
+#
+# 复核要点：
+#   1) 绝不隐式拉取：所有基础标签必须本地在位，缺就报错让人先建/先导。
+#   2) 每层构建后做"终态断言"，不是"命令 rc=0 就算过"：
+#      层1 断言 server.mjs 里那句超时真变成 20000 且 node --check 过；
+#      层2 断言镜像里真能 import 出 PcieIpcAllReduceWorkspace（vLLM 的判据就是这一句）。
+#      标签本来就已在位（没重建）时**同样跑断言**——否则第二次跑等于没验。
+#   3) 回填物料先按 manifest 对拍 sha256 再进构建上下文，缺一件即停。
+#   4) 失败不留半成品标签：docker build 失败本身不产标签，这里再显式确认一次。
+set -u
+D=$(cd "$(dirname "$0")" && pwd)
+PKG=$(cd "$D/.." && pwd)
+
+OFFICIAL=${OFFICIAL:-vllm-sm75:v0.1.7-ultra-beta}
+TO20S=${TO20S:-$OFFICIAL-to20s}
+FINAL=${FINAL:-}                 # 留空=按实际层组合自动取名（SKIP_TO20S 时不该再叫 -to20s-…）
+MODE=${MODE:-auto}
+SKIP_TO20S=${SKIP_TO20S:-0}
+SKIP_PCIEIPC=${SKIP_PCIEIPC:-0}
+SKIP_NVAPI=${SKIP_NVAPI:-0}
+BASE_IMAGE_ID=${BASE_IMAGE_ID:-}
 NVAPI_SHA=4a199f9b259a1098ab9c01d31c67f882a2531a0fbb9c3595ad3d016c7d131d8c
+NVAPI_FILE=$D/libnvidia-api.so.1
+WHEEL_SHA_070=c7adf826568d61fc1b7d3aadd4cae387a35a138bfc08e2deca2f34ecfa280716
+# 0.7.0.post1 的取件地址（公开 PyPI，sha256 是硬门禁，地址只是让你能自查来源）
+WHEEL_URL_070=https://pypi.org/project/flashinfer-python/0.7.0.post1/
 
-# S1：先决定基座从哪来，再预检
-if [ "${BOOTSTRAP:-0}" = "1" ]; then
-  echo "=== 基座 bootstrap：官方源码链（standard → ultra），耗时以小时计（本路径未在本包验证过） ==="
-  [ -d "$CODE/docker" ] || { echo "!! 缺源码树 $CODE/docker（BOOTSTRAP=1 需要包内 code/ 完整）"; exit 4; }
-  ( cd "$CODE" && bash docker/build.sh )
-  ( cd "$CODE" && EDITION=ultra bash docker/build.sh )
-  V="$(tr -d ' \r\n' < "$CODE/docker/VERSION")"
-  BASE_IMG="vllm-sm75:v${V}-ultra"
-  echo "BOOTSTRAP_DONE base=$BASE_IMG"
-fi
+say() { echo "$*"; }
+die() { echo "BUILD_FAIL $*"; exit 2; }
 
-if ! docker image inspect "$BASE_IMG" >/dev/null 2>&1; then
-  echo "!! 基座镜像不在: $BASE_IMG（build.sh 退出码 4 也可能是缺 NVAPI 库或缺 code/ 源码树）"
-  echo "   本包的补丁层都建在 SM75 v0.1.6 ultra 基座之上，基座不随包（约 70G，无法内置）。两条路："
-  echo "   1) 有基座 tar：docker load -i <基座>.tar 后把它的标签改成 $BASE_IMG（或 BASE_IMG=<你的标签> 重跑）"
-  echo "   2) 从源码现建：BOOTSTRAP=1 bash build.sh $CFG  （走 code/ 官方链 standard→ultra，需外网与数小时）"
-  exit 4
-fi
-echo "BASE_IMG=$BASE_IMG  CFG=$CFG"
+have() { docker image inspect "$1" >/dev/null 2>&1; }
 
-# S6：这一段是三轮幂等补丁叠加出来的（重复 elif 永不达、同一句提示打两遍、
-#     末尾还留着与 SKIP_NVAPI 矛盾的"层 2 需自行注释掉"）——重写为互斥三分支
-if [ "${SKIP_NVAPI:-0}" = "1" ]; then
-  echo "!! SKIP_NVAPI=1：跳过层 2（不把 libnvidia-api.so.1 装进镜像）"
-  echo "   代价：没有该库，控制台的 P-State 校验会拒起引擎。三套档模板的 power.mode 要改成 sleep："
-  echo "   sed -i 's/\"mode\": \"pstate\"/\"mode\": \"sleep\"/' \"$PKG/run/profiles\"/*.json"
-  echo "   （或建档之后在控制台里改）。推理本身与其余补丁层不受影响；"
-  echo "   层 2 跳过时 $OUT 由层 1 产物打标签得到，层 3/4 照常建在它上面。"
-elif [ ! -f "$HERE/libnvidia-api.so.1" ]; then
-  echo "!! 缺 docker/libnvidia-api.so.1（层 2 与 P-State 电源管理必需）"
-  echo "   该文件随仓附在 docker/ 里：重新 clone，或按 SHA256SUMS.txt 校验后取回"
-  echo "   （sha256 须＝$NVAPI_SHA，层 2 的 Dockerfile 内有 sha256sum -c 门禁）"
-  echo "   拿不到仓内文件时的取回法见 docker/NVAPI-获取说明-v1.md（从同族镜像提取，一条命令）"
-  echo "   干脆不带它也能建：SKIP_NVAPI=1 bash build.sh $CFG（代价见上一分支的提示）"
-  exit 4
-fi
+# 真正拿去当基座的东西：给了 digest 就用 digest（tag 是可移动的，钉 digest 才知道自己建在哪之上）
+base_ref() { if [ -n "$BASE_IMAGE_ID" ]; then printf '%s' "$BASE_IMAGE_ID"; else printf '%s' "$1"; fi; }
 
-echo "=== 层 1：控制台超时补丁 ==="
-docker build --build-arg BASE="$BASE_IMG" -f "$HERE/Dockerfile.console-patched" -t "$MID" "$HERE"
-if [ "${SKIP_NVAPI:-0}" = "1" ]; then
-  echo "=== 层 2：跳过（SKIP_NVAPI=1）——$OUT 指向层 1 产物 ==="
-  docker tag "$MID" "$OUT"
-  echo "NVAPI_SKIPPED out=$OUT"
+say "=== 0) 前置：物料完整性 ==="
+[ -f "$D/Dockerfile.to20s-v1" ] || die "缺 docker/Dockerfile.to20s-v1"
+[ -f "$D/to20s-patch-v2.sh" ] || die "缺 docker/to20s-patch-v2.sh"
+[ -f "$D/Dockerfile.pcieipc-v1" ] || die "缺 docker/Dockerfile.pcieipc-v1"
+if [ "$SKIP_NVAPI" = "1" ]; then
+  say "  WARN SKIP_NVAPI=1：跳过 NVAPI 前置门。**注意 0.1.7 这条线本来就不把这个库烘进镜像**"
+  say "       （它是宿主侧只读 bind，见 docker/NVAPI-获取说明-v1.md），这个开关放行的是构建检查与启动形态："
+  say "       起容器时 run/start-here-v1.sh 要传 NVAPI=none，并把 profile 的 power.mode 改成 sleep，"
+  say "       否则面板会拒绝启引擎。推理本身与这个库无关。"
 else
-  echo "=== 层 2：NVAPI 库（Dockerfile 内有 sha256sum -c 门禁） ==="
-  docker build --build-arg BASE="$MID" -f "$HERE/Dockerfile.nvapi" -t "$OUT" "$HERE"
+  [ -f "$NVAPI_FILE" ] || die "缺 docker/libnvidia-api.so.1（或改走 SKIP_NVAPI=1，见 docker/NVAPI-获取说明-v1.md）"
+  got=$(sha256sum "$NVAPI_FILE" | cut -d' ' -f1)
+  [ "$got" = "$NVAPI_SHA" ] || die "NVAPI 哈希不符 期望 $NVAPI_SHA 实为 $got"
+  say "  PASS NVAPI sha256 一致（它进的是宿主 bind，不进镜像）"
 fi
-echo "=== 层 3：PLE/AWQ 补丁（patch_ple_awq.py） ==="
-docker build --build-arg BASE="$OUT" -f "$HERE/Dockerfile.awqple" -t "$OUT2" "$HERE"
 
-if [ "$CFG" = "all" ] || [ "$CFG" = "incple" ]; then
-  echo "=== 层 4：PLE 的 auto-round/INC 分支 —— Intel AutoRound W4A16 权重必需 ==="
-  docker build --build-arg BASE="$OUT2" -f "$HERE/Dockerfile.incple" -t "$OUT3" "$HERE"
-  # S2：显式断言补丁真的进了镜像（计数>=1），不再让一条没人看结果的 grep 充当校验
-  NGRAM="$(resolve_ngram "$OUT3" || true)"
-  if [ -z "$NGRAM" ]; then
-    echo "!! 层 4 校验失败：镜像 $OUT3 内解析不到 vllm 的 ngram_embedding.py（下面打的是解释器实况）"
-    docker run --rm --entrypoint python3 "$OUT3" -c 'import sys,sysconfig;print("python",sys.version.split()[0]);print("prefix",sys.prefix);print("purelib",sysconfig.get_paths()["purelib"]);import vllm;print("vllm",vllm.__file__)' 2>&1 | sed 's/^/   /' || true
-    echo "   vllm 那行若报错＝基座不是 SM75 v0.1.6 ultra 派生镜像（层 3 会在同一处停并打 RESOLVE_FAIL）"
-    exit 6
+n_mat=$(awk -F'\t' '!/^#/ && $5=="verbatim"' "$D/pcieipc/manifest.txt" | wc -l | tr -dc '0-9')
+[ "$n_mat" = "6" ] || die "pcieipc manifest 的 verbatim 行数=$n_mat，期望 6"
+while IFS="$(printf '\t')" read -r rel _l _b sha _k; do
+  p="$D/pcieipc/$rel"
+  [ -f "$p" ] || die "缺回填物料 $p"
+  g=$(sha256sum "$p" | cut -d' ' -f1)
+  [ "$g" = "$sha" ] || die "回填物料 sha 不符 $rel 期望 $sha 实为 $g"
+done < <(awk -F'\t' '!/^#/ && $5=="verbatim"' "$D/pcieipc/manifest.txt")
+for b in jit_comm trace_comm comm_init; do
+  [ -s "$D/pcieipc/append/$b.txt" ] || die "缺追加块 $b.txt"
+done
+say "  PASS 回填物料 6 件 sha 全对、3 个追加块非空"
+say "  提示：这 9 件由 flashinfer_python 0.7.0.post1 wheel 解出（源 wheel sha256 $WHEEL_SHA_070）"
+say "        要重新推导：python3 docker/pcieipc/extract-pcieipc.py <该 wheel> <输出目录>"
+
+say "=== 1) 层 0：官方 0.1.7 ultra ==="
+if have "$OFFICIAL"; then
+  say "  已在位 $OFFICIAL -> $(docker image inspect -f '{{.Id}}' "$OFFICIAL" | cut -c8-19)，不重建"
+elif [ "$MODE" = "layers" ]; then
+  die "MODE=layers 但官方基座不在位：$OFFICIAL（先按官方 docker/build.sh 建，或导入）"
+else
+  SRC=${SM75_SRC:-$PKG/code/VLLM-SM75-0.1.7-beta}
+  [ -f "$SRC/docker/build.sh" ] || die "找不到 0.1.7 源码树 $SRC（设 SM75_SRC 指过去）"
+  say "  用官方入口构建：$SRC/docker/build.sh（EDITION=ultra）"
+  ( cd "$SRC" && EDITION=ultra bash docker/build.sh ) || die "官方构建失败"
+  have "$OFFICIAL" || die "官方构建没产出 $OFFICIAL"
+fi
+
+CUR="$OFFICIAL"
+[ -n "$BASE_IMAGE_ID" ] && CUR="$(base_ref "$OFFICIAL")"
+
+say "=== 2) 层 1：GPU 探测超时 20s ==="
+if [ "$SKIP_TO20S" = "1" ]; then
+  say "  SKIP_TO20S=1，跳过（面板在这台机上可能拒启，见 部署文档-v1.md 的『20 秒超时』一节）"
+else
+  if have "$TO20S"; then
+    say "  已在位 $TO20S，跳过重建，但断言照跑（不重建≠已验证）"
+  else
+    ctx=$(mktemp -d) || die "mktemp 失败"
+    cp "$D/Dockerfile.to20s-v1" "$D/to20s-patch-v2.sh" "$ctx/" || { rm -rf "$ctx"; die "准备上下文失败"; }
+    docker build -f "$ctx/Dockerfile.to20s-v1" --build-arg BASE_IMAGE="$(base_ref "$CUR")" -t "$TO20S" "$ctx" || { rm -rf "$ctx"; die "层1 构建失败"; }
+    rm -rf "$ctx"
+    have "$TO20S" || die "层1 没产出标签"
   fi
-  echo "NGRAM_PATH=$NGRAM"
-  [ "$NGRAM" = "$NGRAM_BASE" ] || echo "NGRAM_PATH_DRIFT=$NGRAM（基线 $NGRAM_BASE；布局不同不影响校验，只说明这台机不是参考环境）"
-  CNT="$(docker run --rm --entrypoint grep "$OUT3" -c INCConfig "$NGRAM" || true)"
-  case "${CNT:-0}" in
-    ''|0) echo "!! 层 4 校验失败：$NGRAM 里没有 INCConfig（cnt='${CNT:-0}'）——补丁没进镜像，别当构建成功"
-          docker run --rm --entrypoint ls "$OUT3" -l "$NGRAM" || true
-          exit 6 ;;
-  esac
-  echo "INCPLE_ASSERT_OK cnt=$CNT image=$OUT3"
+  docker run --rm --entrypoint sh "$TO20S" -c \
+    "grep -qE 'timeout: 20000([^0-9]|\$)' /opt/sm75-workbench/console/server.mjs && node --check /opt/sm75-workbench/console/server.mjs && echo TO20S_ASSERT_OK" \
+    | grep -q TO20S_ASSERT_OK || die "层1 终态断言未过（20000 没写进去或语法不过）"
+  say "  PASS 层1 终态断言：server.mjs 里确为 timeout: 20000 且 node --check 过"
+  CUR="$TO20S"
 fi
 
-echo "=== 产物 ==="
-docker image inspect "$MID"  --format "MID={{.Id}}"
-docker image inspect "$OUT"  --format "OUT={{.Id}}"
-docker image inspect "$OUT2" --format "OUT2={{.Id}}"
-if [ "$CFG" = "all" ] || [ "$CFG" = "incple" ]; then
-  docker image inspect "$OUT3" --format "OUT3={{.Id}}"
+# 层2 标签按"实际走过的层"自动命名：SKIP_TO20S=1 时基座是层0，就不该再挂 -to20s 这个名字
+if [ -z "$FINAL" ] && [ "$SKIP_PCIEIPC" != "1" ]; then
+  if [ "$SKIP_TO20S" = "1" ]; then FINAL="$OFFICIAL-pcieipc"; else FINAL="$TO20S-pcieipc"; fi
+  say "  （层2 标签自动取名：$FINAL；要别的名字就显式 FINAL=…）"
 fi
-echo "BUILD_DONE base=$BASE_IMG cfg=$CFG"
+
+say "=== 3) 层 2：FlashInfer PCIe-IPC 回填 ==="
+if [ "$SKIP_PCIEIPC" = "1" ]; then
+  say "  SKIP_PCIEIPC=1，产出停在官方形态：$CUR"
+  echo "BUILD_DONE IMAGE=$CUR"
+  say "  这一形态下 profile 里**别**置 VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC；置了 vLLM 会打印"
+  say "  this FlashInfer build does not provide PcieIpcAllReduceWorkspace 并退回原后端。"
+  exit 0
+fi
+if have "$FINAL"; then
+  say "  已在位 $FINAL，跳过重建，但断言照跑"
+else
+  ctx=$(mktemp -d) || die "mktemp 失败"
+  cp -r "$D/pcieipc/." "$ctx/" || { rm -rf "$ctx"; die "拷上下文失败"; }
+  cp "$D/Dockerfile.pcieipc-v1" "$ctx/Dockerfile" || { rm -rf "$ctx"; die "拷 Dockerfile 失败"; }
+  # Dockerfile 里 COPY 的路径相对上下文根，这里把 pcieipc 内的子目录摆到位
+  docker build -f "$ctx/Dockerfile" --build-arg BASE_IMAGE="$(base_ref "$CUR")" -t "$FINAL" "$ctx" || { rm -rf "$ctx"; die "层2 构建失败"; }
+  rm -rf "$ctx"
+  have "$FINAL" || die "层2 没产出标签"
+fi
+[ "$(docker image inspect -f '{{.Id}}' "$FINAL")" != "$(docker image inspect -f '{{.Id}}' "$CUR")" ] \
+  || die "层2 与基座同 ID，说明补丁层没进去"
+docker run --rm --entrypoint python3 "$FINAL" -c \
+  "import flashinfer.comm as c,sys;sys.exit(0 if hasattr(c,'PcieIpcAllReduceWorkspace') else 1)" \
+  || die "层2 终态断言未过：镜像里 import 不出 PcieIpcAllReduceWorkspace"
+say "  PASS 层2 终态断言：镜像内 hasattr(flashinfer.comm,'PcieIpcAllReduceWorkspace') 为真"
+CUR="$FINAL"
+
+say "=== 4) 完成 ==="
+docker image inspect "$CUR" --format 'IMAGE={{.Id}} SIZE={{.Size}}' | sed 's/^/  /'
+echo "BUILD_DONE IMAGE=$CUR"
+say "回填物料的源 wheel：flashinfer_python-0.7.0.post1（sha256 $WHEEL_SHA_070，取件页 $WHEEL_URL_070）"
+[ "$SKIP_NVAPI" = "1" ] && say "注意：本次 SKIP_NVAPI=1 ⇒ 起容器用 NVAPI=none，且 profile 的 power.mode 必须是 sleep。"
+say "下一步：编辑 run/start-here-v1.sh 顶部的路径（或用同名环境变量覆盖），然后 bash run/env-check-v1.sh && bash run/start-here-v1.sh"
