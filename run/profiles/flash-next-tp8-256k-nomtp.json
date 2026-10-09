@@ -1,10 +1,10 @@
 {
   "id": "flash-next-tp8-256k-nomtp",
-  "name": "Flash Next · TP8 · QSA · FP8 KV · 无MTP · 256K",
+  "name": "Flash Next · TP8 · QSA · FP8 KV · 无MTP · 256K · PCIe-IPC 开",
   "format": "awq",
   "power": {
     "mode": "pstate",
-    "idleSeconds": 86400,
+    "idleSeconds": 120,
     "util": 5,
     "confirm": 60,
     "low": 8,
@@ -32,7 +32,8 @@
     "VLLM_SM75_QSA_SELECTED_PAGES_PREFILL": "1",
     "VLLM_ENFORCE_STRICT_TOOL_CALLING": "1",
     "VLLM_SM75_QSA_MIXED_PREFILL": "1",
-    "VLLM_SM75_NEXT_MIXED_TOKEN_BUDGET": "0"
+    "VLLM_SM75_NEXT_MIXED_TOKEN_BUDGET": "0",
+    "VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC": "1"
   },
   "args": [
     "${MODEL}",
@@ -95,7 +96,9 @@
     "--reasoning-parser",
     "qwen3",
     "--chat-template",
-    "/opt/vllm-sm75/templates/qwen38-next-high-compat.jinja"
+    "/opt/vllm-sm75/templates/qwen38-next-high-compat.jinja",
+    "--auto-sleep-idle-timeout",
+    "0"
   ],
   "modelFamily": "qwen4_exp",
   "defaultModel": "/models/Qwen3.8-Flash-Next-W4A16-FP8PLE"

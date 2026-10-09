@@ -26,7 +26,7 @@
 
 用独立镜像标签做，别改官方产物。构建期硬断言四件事：每个落盘文件的 sha256 与清单一致；三处追加的验收用"目标文件必须以该块内容逐字结尾"，不要用某个字符串出现一次的计数，因为同一句 import 在块里本来会出现三次，计数断言会把好构建判成失败；七个被改和新增的 py 文件 py_compile 要过；最后在镜像里真的执行一次 import flashinfer.comm 并打印 hasattr 的结果，这一句就是 vLLM 自己的判据。构建完做一次两镜像全树清单对拍，期望恰好六个新增、三个内容变化、删除为零，vllm 那棵树变动为零。
 
-启动：用官方模板原样的参数，只多加一个环境变量 VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC 设为 1（这一步不能漏：光有镜像那一层而不置这个变量，vLLM 默认不启用该后端，dispatch 首位仍是 FIREFLY_AR，白建）。验收看引擎日志两行，一是 tp:0 的 dispatch 列表里 FLASHINFER_PCIE_IPC 排到了第一位，二是出现 Initialized FlashInfer PCIe IPC all-reduce。同时确认 GPU KV cache size 仍是 339110 tokens、FP8 layout verified 仍是 96 条（12 个 full_attention 层乘 8 个 worker）、QSA 那组开关值一个都没变、没有 Traceback。计数类判据只取本次启动新增的字节切片，面板的档日志是跨次追加的，整份去数会翻倍。
+启动：用官方模板原样的参数，只多加一个环境变量 VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC 设为 1（这一步不能漏：光有镜像那一层而不置这个变量，vLLM 默认不启用该后端，dispatch 首位仍是 FIREFLY_AR，白建）。用本包 run/profiles 里那两份档就不用手工加——这一条已经写在档的 env 里；关它请走 bash run/configure-v1.sh 的"能力开关"那一题，或直接 setenv 成 0。验收看引擎日志两行，一是 tp:0 的 dispatch 列表里 FLASHINFER_PCIE_IPC 排到了第一位，二是出现 Initialized FlashInfer PCIe IPC all-reduce。同时确认 GPU KV cache size 仍是 339110 tokens、FP8 layout verified 仍是 96 条（12 个 full_attention 层乘 8 个 worker）、QSA 那组开关值一个都没变、没有 Traceback。计数类判据只取本次启动新增的字节切片，面板的档日志是跨次追加的，整份去数会翻倍。
 
 我这台的实测结果（@150 W 工况）：8K decode 中位 44.55 提到 58.01，加 30.2%，步时从 22.45 毫秒降到 17.24 毫秒；128K 与 256K 同向，分别 17.12 与 17.03 毫秒；prefill 三档分别是 −0.03%、−0.09%、−0.13%（也就是没动）。面板自带的那把尺上，同长度逐档配对输出吞吐 加 30.5% 到 33.1%。省下来的约 5 毫秒与上下文长度无关，正是每步一次 allreduce 的形状。功耗从每卡 90 瓦升到 118 瓦（基线那侧的 90 瓦来自面板性能监控页的逐卡读数 87.8 到 92.5 瓦），但每 token 能量几乎没变（2.06 对 2.03 焦耳，这两个数是功耗除以吞吐算出来的计算值，不是仪器实测），也就是功耗上涨完全由步数增加解释，不是提频或解锁功率墙，别把这个当机制。
 

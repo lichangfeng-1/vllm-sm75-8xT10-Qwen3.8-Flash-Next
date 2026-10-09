@@ -1,10 +1,10 @@
 {
-  "id": "flash-next-tp8-256k-nomtp-pcieipc",
-  "name": "Flash Next · TP8 · QSA · FP8 KV · 无MTP · 256K · 推荐（带 PCIe-IPC 后端）",
-  "format": "awq",
+  "id": "flash-next-tp8-256k-autoround",
+  "name": "Flash Next · TP8 · QSA · FP8 KV · 无MTP · 256K · AutoRound W4A16",
+  "format": "custom",
   "power": {
     "mode": "pstate",
-    "idleSeconds": 86400,
+    "idleSeconds": 120,
     "util": 5,
     "confirm": 60,
     "low": 8,
@@ -20,7 +20,7 @@
     "NCCL_IB_DISABLE": "1",
     "NCCL_P2P_DISABLE": "0",
     "OMP_NUM_THREADS": "1",
-    "VLLM_SM75_QWEN38_HC_GEMV": "1",
+    "VLLM_SM75_QWEN38_HC_GEMV": "0",
     "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE": "134217728",
     "VLLM_USE_BREAKABLE_CUDAGRAPH": "1",
     "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
@@ -38,7 +38,7 @@
   "args": [
     "${MODEL}",
     "--served-model-name",
-    "Flash-Next-TP8",
+    "Qwen3.8-Flash-Next-W4A16-AutoRound",
     "--dtype",
     "float16",
     "--hf-overrides",
@@ -96,8 +96,10 @@
     "--reasoning-parser",
     "qwen3",
     "--chat-template",
-    "/opt/vllm-sm75/templates/qwen38-next-high-compat.jinja"
+    "/opt/vllm-sm75/templates/qwen38-next-high-compat.jinja",
+    "--auto-sleep-idle-timeout",
+    "0"
   ],
   "modelFamily": "qwen4_exp",
-  "defaultModel": "/models/Qwen3.8-Flash-Next-W4A16-FP8PLE"
+  "defaultModel": "/models/Qwen3.8-Flash-Next-W4A16-AutoRound"
 }

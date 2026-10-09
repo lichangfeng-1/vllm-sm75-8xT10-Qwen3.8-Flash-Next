@@ -17,7 +17,7 @@ D=$(cd "$P/.." && pwd)                     # 包根
 case "${1:-}" in
   -h|--help) echo "用法：bash tools/sha256-weights-v1.sh [权重目录]（或 MODELS=/路径）"; exit 0 ;;
   "") : ;;
-  -*|--*) echo "ARGS_BAD 位置参数只接受权重目录，收到：$1"; exit 2 ;;
+  -*) echo "ARGS_BAD 位置参数只接受权重目录，收到：$1"; exit 2 ;;
   *) M="$1" ;;
 esac
 M=${M:-${MODELS:-/var/lib/sm75-models/Flash-Next-FP8PLE}}

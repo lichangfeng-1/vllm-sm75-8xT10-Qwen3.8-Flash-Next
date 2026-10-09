@@ -1,13 +1,18 @@
 #!/bin/bash
-# start-here-v1.sh —— vLLM-SM75 0.1.7 自包含部署包的唯一启动入口
+# start-here-v2.sh —— vLLM-SM75 0.1.7 自包含部署包的唯一启动入口
+#
+# v2 相对 v1 的三处变化（其余逐字保留）：
+#   ① 进 P8 的默认值 86400 s → 120 s（官方文档自己写"部署后可按需要调小"，86400 是测速常驻档）；
+#   ② 读 $DATA/config.env（由 run/configure-v1.sh 写）——按行按白名单取键，不 source；
+#   ③ 拷进容器的改档工具升到 console-edit-profile-v2.cjs（多 addarg/delarg/setfield/setmodel/dump/list）。
 #
 # 为什么要有这个脚本：控制台容器的启动参数一旦少一条（内存上限、shm、ulimit、某条缓存 bind），
 # 表现不是"起不来"，而是"看起来一样但行为不同"——重付编译费，或者引擎被 OOM 杀。
 # 所以全部显式化、每条进门禁；机器专属路径一律走环境变量，脚本里不写死。
 #
 # 用法：
-#   DATA=/var/lib/sm75-console MODELS=/var/lib/sm75-models/Flash-Next-FP8PLE bash run/start-here-v1.sh
-#   先看组装出来的命令、且确认零副作用：  ... bash run/start-here-v1.sh --dry-run
+#   DATA=/var/lib/sm75-console MODELS=/var/lib/sm75-models/Flash-Next-FP8PLE bash run/start-here-v2.sh
+#   先看组装出来的命令、且确认零副作用：  ... bash run/start-here-v2.sh --dry-run
 #
 # 起完之后引擎不会自起（生产惯例，自起会在开机时抢卡）：去面板点「启动」，或
 #   docker exec "$NAME" node /console-data/tmp/console-driver-v1.cjs start <profileId>
@@ -16,6 +21,15 @@
 set -u
 
 P=$(cd "$(dirname "$0")/.." && pwd)          # 包根，tools/panel/ 相对它
+
+# ---------- 参数来源优先级：调用方 env ＞ $CONFIG ＞ 包内默认 ----------
+# 先记下"哪些键调用方已经在环境里给了"，否则 config.env 会把显式传的值悄悄盖掉。
+# CONFIG 与 DATA 只认 env／默认值，不从 config.env 读——"配置文件在哪"不能靠它自己定义。
+FROM_ENV=" "
+for _k in NAME IMG MODELS CACHE NVAPI ENVFILE BIND_HOST PANEL_PORT API_PORT MEM_LIMIT SHM_SIZE RESTART PSTATE_IDLE_TIMEOUT; do
+  [ -n "${!_k:-}" ] && FROM_ENV="$FROM_ENV$_k "
+done
+CONFIG=${CONFIG:-${DATA:-/var/lib/sm75-console}/config.env}
 
 # ---------- 可覆盖参数（默认值＝官方 0.1.7 文档口径；本机漂移见 基线与口径说明-v1.md） ----------
 NAME=${NAME:-sm75-017-console}
@@ -36,6 +50,28 @@ SHM_SIZE=${SHM_SIZE:-17179869184}                         # 16 GiB＝官方文�
 RESTART=${RESTART:-no}                                    # 生产惯例：用完即停、不自起
 NVAPI_SHA=4a199f9b259a1098ab9c01d31c67f882a2531a0fbb9c3595ad3d016c7d131d8c
 
+# $CONFIG 由 run/configure-v1.sh 写（面板端口、内存上限、P8 秒数这些）。这里**按行按白名单取键**，
+# 不 source：config.env 是配置文件，不是可执行入口——source 一个被人改过的文件等于把 shell 交出去。
+if [ -s "$CONFIG" ]; then
+  n_cfg=0
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in *=*) : ;; *) continue ;; esac
+    k=${line%%=*}; v=${line#*=}
+    case "$k" in
+      NAME|IMG|MODELS|CACHE|NVAPI|ENVFILE|BIND_HOST|PANEL_PORT|API_PORT|MEM_LIMIT|SHM_SIZE|RESTART|PSTATE_IDLE_TIMEOUT) : ;;
+      *) continue ;;                                  # 白名单外的键直接丢
+    esac
+    # `+` 不是 `*`：BIND_HOST= （空值）必须被拦，否则拼出 `--publish ":1615:…"` ＝ docker 绑到全网卡，
+    # 而端口暴露这件事要等到第 5 步的断言才红——容器已经带着敞开的口起来了。
+    printf '%s' "$v" | grep -qE '^[A-Za-z0-9._:/,=-]+$' || { echo "BLOCK $CONFIG 里 $k 的值不合规（空值或含非法字符；只允许字母数字与 ._:/,=-）"; exit 4; }
+    case "$FROM_ENV" in *" $k "*) continue ;; esac     # 调用方显式给的优先，不被文件盖掉
+    printf -v "$k" '%s' "$v"
+    n_cfg=$((n_cfg + 1))
+  done < "$CONFIG"
+  echo "  已读 $CONFIG：$n_cfg 项生效（调用方 env 覆盖的项保持原值）"
+fi
+
 # 最小 env 集（没有 console.env 时用）。值来自 2026-10-07 在役容器实读，不是抄文档：
 #   镜像自己已带 SM75_EDITION/NCCL_P2P_LEVEL/VLLM_FIREFLY/NVIDIA_VISIBLE_DEVICES，这里只补面板行为项。
 # SM75_CONSOLE_ROOT 必须是 /console-data（= bind 目标）。写成镜像默认的 /data 或别的路径，
@@ -47,8 +83,8 @@ BOOTSTRAP_DEFAULT=(
   SM75_CONSOLE_HOST=0.0.0.0
   SM75_CONSOLE_PORT=1615
   POWER_MODE=pstate
-  PSTATE_GPUS=0,1,2,3,4,5,6,7
-  PSTATE_IDLE_TIMEOUT=86400
+  "PSTATE_GPUS=0,1,2,3,4,5,6,7"
+  PSTATE_IDLE_TIMEOUT=120
   TZ=Asia/Shanghai
   NVIDIA_VISIBLE_DEVICES=all
 )
@@ -75,6 +111,23 @@ if [ "$NVAPI" = "none" ]; then
   done
   BOOTSTRAP=("${nb[@]}")
 fi
+# 进 P8 的秒数有两处：容器 env 与档里的 power.idleSeconds。**两处都写同值，别赌谁赢。**
+# 2026-10-09 真机实测（八卡当时都在 P8/645 MHz）：容器 Config.Env 是 86400，档 personal-236e5312-0a7 写 120，
+# 而真正跑着的 pstate-supervisor 进程 environ 里是 **120** ⇒ 这台机上生效的是档值。
+# 镜像里 runtime-entrypoint.py 用的是 env.setdefault，但 server.mjs 与 pstate-supervisor.sh 里都没有
+# idleSeconds 字样，值到底从哪一路传下去**尚未定位** ⇒ 不写进包当结论，只按"两处同值"这条安全侧走。
+# 权威判据是读 supervisor 进程的 environ（见 部署文档 步骤 5 的那条命令），不是读 Config.Env。
+if [ -n "${PSTATE_IDLE_TIMEOUT:-}" ] && [ "${#BOOTSTRAP[@]}" != "0" ]; then
+  ib=()
+  for kv in "${BOOTSTRAP[@]}"; do
+    case "$kv" in
+      PSTATE_IDLE_TIMEOUT=*) ib+=(PSTATE_IDLE_TIMEOUT="$PSTATE_IDLE_TIMEOUT") ;;
+      *) ib+=("$kv") ;;
+    esac
+  done
+  if [ "${#ib[@]}" != "0" ]; then BOOTSTRAP=("${ib[@]}"); fi
+  case " ${BOOTSTRAP[*]:-} " in *PSTATE_IDLE_TIMEOUT=*) : ;; *) BOOTSTRAP+=(PSTATE_IDLE_TIMEOUT="$PSTATE_IDLE_TIMEOUT") ;; esac
+fi
 # 注意：BOOTSTRAP_ENV=""（或只有分号）会切出空数组 ⇒ 一个 -e 都不发。这个后果留到门禁里判
 # （见下面"最小 env 集"那一项），不在这里报错——那时 bad()/fail 还没定义，写了也不算数。
 
@@ -82,7 +135,7 @@ DRY=no
 for a in "$@"; do
   case "$a" in
     --dry-run) DRY=yes ;;
-    *) echo "用法：bash run/start-here-v1.sh [--dry-run]"; exit 2 ;;
+    *) echo "用法：bash run/start-here-v2.sh [--dry-run]"; exit 2 ;;
   esac
 done
 
@@ -130,7 +183,7 @@ port_holder() {
 }
 for hp in "$PANEL_PORT" "$API_PORT"; do
   holder=$(port_holder "$hp")
-  if [ -z "$holder" ] && command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -qE "[:.]$hp[[:space:]]"; then
+  if [ -z "$holder" ] && command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -qE "[:.]${hp}[[:space:]]"; then
     holder="(宿主上有进程在听，非容器)"
   fi
   if [ -n "$holder" ]; then msg "宿主端口 $hp 被 $holder 占着（真起容器会撞端口；--dry-run 只看组装，故降为 WARN）"; else good "宿主端口 $hp 空闲"; fi
@@ -216,10 +269,21 @@ for where in "$DATA" "$CACHE"; do
   else bad "$where 所在盘（$tgt）余量只有 $a2 GiB < 20（面板数据与四条缓存都写这里）"; fi
 done
 
+# P8 秒数有三处来源：env-file、config.env（本脚本读）、档里的 power.idleSeconds。
+# 有 env-file 时本脚本只发 --env-file、不再逐条 -e ⇒ env-file 那一行赢，这里只报不一致。
+if [ -s "$ENVFILE" ]; then
+  piv=$(grep -E '^PSTATE_IDLE_TIMEOUT=' "$ENVFILE" 2>/dev/null | tail -1 | cut -d= -f2-)
+  if [ -n "${piv:-}" ] && [ "$piv" != "${PSTATE_IDLE_TIMEOUT:-120}" ]; then
+    warn "env-file 里 PSTATE_IDLE_TIMEOUT=$piv，本次默认 ${PSTATE_IDLE_TIMEOUT:-120} —— 有 env-file 时以 env-file 为准，要统一就改它或删那行"
+  fi
+fi
+
 # 包内面板 CLI 工具（B10：不发这两个文件，别人照包跑就点不亮那个后端）
-for f in console-driver-v1.cjs console-edit-profile-v1.cjs; do
+for f in console-driver-v1.cjs console-edit-profile-v2.cjs; do
   [ -s "$P/tools/panel/$f" ] || bad "包里缺 tools/panel/$f"
 done
+# 包内两靶档：configure 的 clone（建第二靶档）从容器里读它们，缺了就是"文档有、路径无"
+ls "$P"/run/profiles/*.json >/dev/null 2>&1 || bad "包里 run/profiles/ 没有一份 JSON 档"
 
 if [ "$fail" = "yes" ]; then
   echo "GATE_FAIL 上面 BLOCK 项已清零之前，本脚本没有做过任何写操作（没建目录、没 chmod、没拷文件、没起容器）"
@@ -230,6 +294,12 @@ echo "=== 2) 组装 docker run（纯计算，不写任何东西）==="
 ENVARGS=()
 if [ -s "$ENVFILE" ]; then
   ENVARGS=(--env-file "$ENVFILE")
+  # 有 env-file 时 BOOTSTRAP 整组不发 ⇒ config.env / 调用方给的 PSTATE_IDLE_TIMEOUT 会静默丢掉。
+  # 这里单独把它补成 -e。docker 的 `-e` 与 `--env-file` 谁赢，本机没守护进程可实测、也不去赌——
+  # 第 5.6 步直接读容器实际生效值断言，不符就红（把"未文档化的优先级"变成"可验证的终态"）。
+  if [ -n "${PSTATE_IDLE_TIMEOUT:-}" ]; then
+    ENVARGS+=(-e "PSTATE_IDLE_TIMEOUT=$PSTATE_IDLE_TIMEOUT")
+  fi
 else
   for kv in "${BOOTSTRAP[@]}"; do ENVARGS+=(-e "$kv"); done
 fi
@@ -255,8 +325,8 @@ printf '  %q ' "${CMD[@]}"; echo
 
 if [ "$DRY" = "yes" ]; then
   echo "DRY_RUN_OK 上面就是将要执行的命令。将要写的东西（本次一律没做）："
-  echo "    mkdir -p $CACHE/{root-cache,triton,nv,tilelang} 与 $DATA/tmp；chmod 700 $DATA"
-  echo "    cp tools/panel/*.cjs -> $DATA/tmp/"
+  echo "    mkdir -p $CACHE/{root-cache,triton,nv,tilelang} 与 $DATA/tmp/profiles；chmod 700 $DATA"
+  echo "    cp tools/panel/*.cjs -> $DATA/tmp/；cp run/profiles/*.json -> $DATA/tmp/profiles/"
   echo "  本次没有建目录、没有 chmod、没有拷文件、没有起容器。"
   exit 0
 fi
@@ -266,10 +336,20 @@ echo "=== 3) 目录与面板 CLI 工具就绪（门禁通过且非 dry-run 才�
 for d in root-cache triton nv tilelang; do mkdir -p "$CACHE/$d" || { echo "WRITE_FAIL 建不出缓存目录 $CACHE/$d"; exit 3; }; done
 mkdir -p "$DATA/tmp" || { echo "WRITE_FAIL 建不出 $DATA/tmp"; exit 3; }
 chmod 700 "$DATA" 2>/dev/null
-for f in console-driver-v1.cjs console-edit-profile-v1.cjs; do
+mkdir -p "$DATA/tmp/profiles" || { echo "WRITE_FAIL 建不出 $DATA/tmp/profiles"; exit 3; }
+for f in console-driver-v1.cjs console-edit-profile-v2.cjs; do
   cp "$P/tools/panel/$f" "$DATA/tmp/$f" || { echo "WRITE_FAIL 拷不进 $DATA/tmp/$f"; exit 3; }
 done
-echo "  已就绪：$CACHE/{root-cache,triton,nv,tilelang}、$DATA(700)、$DATA/tmp/{console-driver-v1.cjs,console-edit-profile-v1.cjs}"
+# 包内两靶档也摆进容器可读的 bind：configure 的 clone 模式（建第二靶档）唯一的取件通道就是这里，
+# 不拷的话那两份 JSON 是惰性文件——文档承诺了功能，脚本却没给路径。
+n_pf=0
+for j in "$P"/run/profiles/*.json; do
+  [ -f "$j" ] || continue
+  cp "$j" "$DATA/tmp/profiles/$(basename "$j")" || { echo "WRITE_FAIL 拷不进 $(basename "$j")"; exit 3; }
+  n_pf=$((n_pf + 1))
+done
+[ "$n_pf" != "0" ] || { echo "WRITE_FAIL 包内 run/profiles/ 一份 JSON 都没有"; exit 3; }
+echo "  已就绪：$CACHE/{root-cache,triton,nv,tilelang}、$DATA(700)、$DATA/tmp/{console-driver-v1.cjs,console-edit-profile-v2.cjs}、$DATA/tmp/profiles/($n_pf 份档)"
 
 echo "=== 4) 起容器并等面板有响应（最多 3 分钟）==="
 "${CMD[@]}" || { echo "RUN_FAIL docker run 非零退出"; exit 5; }
@@ -317,11 +397,24 @@ if docker inspect -f '{{range .Mounts}}{{.Destination}}{{println .}}{{end}}' "$N
   echo "  PASS /console-data 在挂载表里"
 else cf "/console-data 不在挂载表里（面板数据会落在容器可写层）"; fi
 
-# 5.5 面板 CLI 工具真的在容器里看得见
-for f in console-driver-v1.cjs console-edit-profile-v1.cjs; do
+# 5.5 面板 CLI 工具与包内档模板真的在容器里看得见
+for f in console-driver-v1.cjs console-edit-profile-v2.cjs; do
   if docker exec "$NAME" test -s "/console-data/tmp/$f"; then echo "  PASS 容器内可见 /console-data/tmp/$f"
   else cf "/console-data/tmp/$f 在容器里看不到（bind 映射没生效？）"; fi
 done
+npf=$(docker exec "$NAME" sh -c 'ls /console-data/tmp/profiles/*.json 2>/dev/null | wc -l' | tr -dc '0-9')
+if [ "${npf:-0}" != "0" ]; then echo "  PASS 容器内可见 /console-data/tmp/profiles/（$npf 份，configure 的 clone 靠它）"
+else cf "/console-data/tmp/profiles/ 里没有 JSON ⇒ 第二靶子建不出来"; fi
+
+# 5.6 P8 秒数：读容器的 Config.Env。注意这条**只证明"docker 被告知的是哪个值"**，
+#     不证明"引擎 supervisor 实际用的是哪个"——2026-10-09 真机实测过：Config.Env 是 86400 而
+#     supervisor 进程 environ 是 120（档值生效）。要判"实际生效"就读 supervisor 的 environ，命令见部署文档步骤 5。
+if [ -n "${PSTATE_IDLE_TIMEOUT:-}" ]; then
+  got_p=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$NAME" 2>/dev/null \
+          | grep -E '^PSTATE_IDLE_TIMEOUT=' | tail -1 | cut -d= -f2-)
+  if [ "$got_p" = "$PSTATE_IDLE_TIMEOUT" ]; then echo "  PASS 容器 env 里 PSTATE_IDLE_TIMEOUT=$got_p（只证 docker 被告知值；实际生效看 supervisor 的 environ）"
+  else cf "容器 env 里 PSTATE_IDLE_TIMEOUT=${got_p:-（没有这一条）}，与本次要求的 $PSTATE_IDLE_TIMEOUT 不符（多半是 $ENVFILE 里那行赢了过去——把它改成同值或删掉，再重建容器）"; fi
+fi
 
 if [ "$check_fail" = "yes" ]; then
   echo "DONE_WITH_FAILS 容器起了但终态断言没过 —— 别按成功用；上面 ASSERT_FAIL 每条都要解决或显式撤回该层"
