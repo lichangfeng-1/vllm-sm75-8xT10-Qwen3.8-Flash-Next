@@ -3,7 +3,7 @@
 ## 先说清一件事：0.1.7 这条线不把它烘进镜像
 
 0.1.6 包把它做成了一个镜像层（`Dockerfile.nvapi`）。**0.1.7 官方形态不是这样**：
-这个库以**宿主文件只读 bind** 的方式进容器（`run/start-here-v1.sh` 里那条
+这个库以**宿主文件只读 bind** 的方式进容器（`run/start-here-v2.sh` 里那条
 `$NVAPI:/usr/local/nvidia/lib64/libnvidia-api.so.1:ro`），与官方 0.1.7 文档一致。
 所以 `docker/build.sh` 里跟它有关的只有"前置门"——查文件在不在、sha 对不对，仅此一项而已。
 
@@ -29,12 +29,13 @@ sha256sum libnvidia-api.so.1
 
 ```bash
 SKIP_NVAPI=1 bash docker/build.sh                       # ① 放行构建前置门
-NVAPI=none   bash run/start-here-v1.sh                  # ② 起容器时不加那条 bind
+NVAPI=none   bash run/start-here-v2.sh                  # ② 起容器时不加那条 bind
 # ③ profile 的 power.mode 从 pstate 改成 sleep（等价"不管电源"）：
-#    还没建档、用包内模板的话直接改模板：
-sed -i 's/"mode": "pstate"/"mode": "sleep"/' run/profiles/*.json
-#    已经建好的档：在控制台网页里改那一项。console-edit-profile-v1.cjs 只管 env 与 args，
-#    不碰 power（power 不在 argv 里，走的是面板设置接口）。
+#    还没建档、用包内模板的话改你**要用那一份**（别拿 *.json 通配，两靶档会被一起改掉）：
+sed -i 's/"mode": "pstate"/"mode": "sleep"/' run/profiles/flash-next-tp8-256k-nomtp.json
+#    已经建好的档：用改档工具的 setfield 通道（power 不在 argv 里，v2 起才碰得到它）——
+#      docker exec <容器> node /console-data/tmp/console-edit-profile-v2.cjs <profileId> setfield power.mode sleep
+#    或者直接跑 bash run/configure-v1.sh，它的"电源托管方式"那一题就是干这个的。
 ```
 
 代价：**没有这个库就没有 P-State 托管**，空闲时不会把卡拉到低功耗档。

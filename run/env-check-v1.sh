@@ -98,13 +98,13 @@ fi
 
 echo "=== 7) 端口与共存 ==="
 for hp in ${PANEL_PORT:-1615} ${API_PORT:-8000}; do
-  if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -qE "[:.]$hp[[:space:]]"; then w "宿主端口 $hp 已被监听（启动入口会拦，先腾出来）"; else p "宿主端口 $hp 空闲"; fi
+  if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -qE "[:.]${hp}[[:space:]]"; then w "宿主端口 $hp 已被监听（启动入口会拦，先腾出来）"; else p "宿主端口 $hp 空闲"; fi
 done
 n=$(docker ps -q 2>/dev/null | wc -l | tr -dc '0-9')
 i "当前在跑容器 $n 个；若其中有占八卡或共享同一份 console-data 的，启动入口会拒绝"
 
 if [ "$BLOCKS" -gt 0 ]; then
-  echo "ENV_CHECK_FAIL BLOCK=$BLOCKS（先解决这些再跑 docker/build.sh 与 run/start-here-v1.sh）"
+  echo "ENV_CHECK_FAIL BLOCK=$BLOCKS（先解决这些再跑 docker/build.sh 与 run/start-here-v2.sh）"
   exit 4
 fi
-echo "ENV_CHECK_DONE BLOCK=0，可以跑 docker/build.sh 与 run/start-here-v1.sh"
+echo "ENV_CHECK_DONE BLOCK=0，可以跑 docker/build.sh 与 run/start-here-v2.sh"

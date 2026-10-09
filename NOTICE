@@ -6,6 +6,7 @@ backport. It is NOT a fork of vLLM and it ships no vLLM source tree.
 It bundles, references, or extends the following third-party / upstream work:
 
 1. vLLM-SM75 0.1.7-beta  (upstream vLLM 0.30.0, commit ced6857afa0ea7b2e3f0846a62e1394e90f15607)
+   Upstream project: https://github.com/fishensw/VLLM-SM75
    Copyright of the vLLM-SM75 / vLLM authors; licensed under the Apache License,
    Version 2.0.  The source tree is provided by You (set SM75_SRC= ... ); this package
    only calls the upstream docker/build.sh to produce the base image
@@ -56,12 +57,12 @@ It bundles, references, or extends the following third-party / upstream work:
    from the host and is never baked into an image.  If you would rather not carry the
    binary, use the documented way-back:
      SKIP_NVAPI=1 bash docker/build.sh
-     NVAPI=none   bash run/start-here-v1.sh
+     NVAPI=none   bash run/start-here-v2.sh
      and set power.mode = sleep in the profile (pstate otherwise makes the console
      refuse to start the engine).
    Its integrity is pinned by sha256
    4a199f9b259a1098ab9c01d31c67f882a2531a0fbb9c3595ad3d016c7d131d8c
-   (enforced by docker/build.sh and run/start-here-v1.sh).
+   (enforced by docker/build.sh and run/start-here-v2.sh).
    See docker/NVAPI-获取说明-v1.md for how to obtain it from your own driver instead.
 
 6. Model weights are NOT part of this package.  tools/flash-next-tested.sha256 is the

@@ -31,7 +31,7 @@ done
 [ -n "$PY" ] || { echo "LINT_FAIL 找不到能用的 python 解释器（试过 ${SM75_PY_CANDIDATES:-python3 python py}）"; exit 3; }
 echo "  解释器=$PY ($("$PY" -c 'import sys;print(sys.version.split()[0])' 2>/dev/null))"
 
-TXT_EXT='sh|py|md|json|txt|cuh|cu|gitignore|gitattributes|LICENSE|NOTICE'
+# TXT_EXT 曾用于 B 段挑文本文件，现由 find 的扩展名条件直接决定 ⇒ 删掉死变量
 
 echo "=== A) 语法 ==="
 n_sh=0
@@ -67,40 +67,58 @@ done < <(find . -type f \( -name "*.sh" -o -name "*.py" -o -name "*.md" -o -name
 echo "=== C) 凭据与隐私扫描 ==="
 # 身份黑名单**不能写死在包内文件里**：写进来这个脚本就成了泄露源本身，而为了不让它自匹配又把它排除在
 # 扫描外，等于给泄露源开免检。所以：通用形态内置，具体身份串放仓库之外的文件（PRIVACY_PATTERNS 指过去）。
-GENERIC='(AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|[A-Za-z0-9+/]{40,}\.git|-----BEGIN CERTIFICATE-----|smtp://[^ :]+:[^ @]+@|://[^ /@ ]+:[^ @]{6,}@)'
-hits=$(grep -rInE "$GENERIC" . --exclude-dir=.git --exclude=SHA256SUMS.txt --exclude=lint-package-v1.sh 2>/dev/null | cut -d: -f1,2 | head -10)
-[ -n "$hits" ] && bad "疑似密钥/令牌:$(echo "$hits" | tr '\n' ' ')" || ok "无通用密钥形态命中"
+# 模式里那个证书头要写成 `[E]`：原样写会让这一行自己匹配自己——检查器含被测值＝它自己就是泄露源，
+# 而"为了不自匹配把它排除在扫描外"等于给泄露源开免检（本段第 ① 条堵的就是这个）。
+GENERIC='(AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|[A-Za-z0-9+/]{40,}\.git|-----BEGIN CERTIFICAT[E]-----|smtp://[^ :]+:[^ @]+@|://[^ /@ ]+:[^ @]{6,}@)'
+# 三条假绿通道本轮一起堵：① 不再 --exclude 自己（自匹配就改到不自匹配，不是给泄露源开免检）；
+# ② 每条模式判 grep 退出码（≥2＝正则写坏，吞掉 stderr 就等于"扫过了"）；③ 扫描条数要有计数，
+# 清单为空或全是注释时不许报绿。
+hits=$(grep -rInE "$GENERIC" . --exclude-dir=.git --exclude=SHA256SUMS.txt 2>/dev/null | cut -d: -f1,2 | head -10)
+[ -n "$hits" ] && bad "疑似密钥/令牌:$(echo "$hits" | tr '\n' ' ')" || ok "无通用密钥形态命中（本脚本自身也在扫描范围内）"
 PFILE=${PRIVACY_PATTERNS:-$D/../privacy-patterns.txt}
 if [ -f "$PFILE" ]; then
+  n_pat=0
   while IFS= read -r pat; do
     [ -z "$pat" ] && continue
     case "$pat" in \#*) continue ;; esac
-    hits=$(grep -rInE "$pat" . --exclude-dir=.git --exclude=SHA256SUMS.txt 2>/dev/null | cut -d: -f1,2 | head -10)
-    [ -n "$hits" ] && bad "命中身份/位置模式（来自仓外清单）$pat: $(echo "$hits" | tr '\n' ' ')"
+    n_pat=$((n_pat + 1))
+    grep -rInE "$pat" . --exclude-dir=.git --exclude=SHA256SUMS.txt >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -ge 2 ]; then bad "仓外清单里这条 ERE 写坏（grep rc=$rc，正则本身有问题）：$pat"; continue; fi
+    if [ "$rc" = "0" ]; then
+      hits=$(grep -rInE "$pat" . --exclude-dir=.git --exclude=SHA256SUMS.txt 2>/dev/null | cut -d: -f1,2 | head -10)
+      bad "命中身份/位置模式（来自仓外清单）$pat: $(echo "$hits" | tr '\n' ' ')"
+    fi
   done < "$PFILE"
-  ok "已按仓外 PRIVACY_PATTERNS 清单扫描"
+  if [ "$n_pat" = "0" ]; then bad "仓外清单 $PFILE 一条模式都没有 ⇒ 这一轮等于没扫"
+  else ok "已按仓外 PRIVACY_PATTERNS 清单扫描 $n_pat 条模式（逐条判 grep 退出码）"; fi
 else
   bad "缺仓外身份清单 $PFILE ⇒ 具体姓名/用户名/宿主路径/内网段没扫。补法：在该文件里逐行写 ERE（此文件必须在仓库之外）"
 fi
 # 通用"机器专属形状"内置（不含任何具体身份值）
 # 反斜杠要写成字符类：写成 "盘符:\|盘符:\Users" 那种形式时，bash 递给 grep 的是 `\|`，
 # 而 ERE 里 `\|` 是**字面竖线**，那条分支永不为真 ⇒ 盘符路径根本不扫（本脚本自己也在这道门的扫描范围内）。
-hits=$(grep -rInE "(/home/|/Users/)[a-z0-9._-]{4,}|[A-Za-z]:[\\]|[0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}" . --exclude-dir=.git --exclude=SHA256SUMS.txt 2>/dev/null | grep -vE "0[.]0[.]0[.]0|127[.]0[.]0[.]1|localhost" | cut -d: -f1,2 | head -12)
+# 路径与 IP **分两路扫**。以前是同一条件里带上 IP、再在管道尾部 `grep -vE "0\.0\.0\.0|localhost"`
+# 整行放行——一行里同时写着 0.0.0.0 和真内网 IP 时整行被洗掉＝假绿。
+hits=$(grep -rInE "(/home/|/Users/)[a-z0-9._-]{4,}|[A-Za-z]:[\\]" . --exclude-dir=.git --exclude=SHA256SUMS.txt 2>/dev/null | cut -d: -f1,2 | head -12)
+ips=$(grep -rhoE "[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}" . --exclude-dir=.git --exclude=SHA256SUMS.txt 2>/dev/null | grep -vE '^(0\.0\.0\.0|127\.0\.0\.1|255\.255\.255\.255)$' | sort -u)
+[ -n "$ips" ] && bad "出现具体 IP 形状（0.0.0.0／回环／广播之外一律要核）：$(echo "$ips" | tr '\n' ' ')" || ok "无内网地址形状命中"
 [ -n "$hits" ] && bad "疑似本机专属路径/IP 形状:$(echo "$hits" | tr '
-' ' ')" || ok "无本机路径与 IP 形状命中"
+' ' ')" || ok "无本机专属路径形状命中"
 
 echo "=== D) 文档引用断链 ==="
 miss=0
 while IFS= read -r ref; do
   [ -z "$ref" ] && continue
-  case "$ref" in http*|https*|\#*) continue ;; esac
+  case "$ref" in http*|\#*) continue ;; esac
   # glob 与占位写法不是链接；含非 ASCII（如省略号）的是文档示例，也不算断链
-  case "$ref" in *"*"*|*"?"*) continue ;; esac
+  case "$ref" in *'*'*) continue ;; esac
+  case "$ref" in *'?'*) continue ;; esac
   if printf '%s' "$ref" | LC_ALL=C grep -q '[^ -~]'; then continue; fi
   p=$(printf '%s' "$ref" | sed 's|^./||')
   [ -e "$p" ] || { bad "引用不存在: $p"; miss=$((miss + 1)); }
 done < <(grep -rhoE '\((\.?/?)(docker|run|tools|docs|code)/[^) ]+|`(\./)?(docker|run|tools|docs)/[^` ]+`|!\[[^]]*\]\(([^)]+)\)' \
-            --include='*.md' . 2>/dev/null \
+            --include='*.md' --exclude-dir=内部 --exclude-dir=.git . 2>/dev/null \
           | sed -E 's/^!\[[^]]*\]\(//; s/^[\(`]//; s/[\)`]$//')
 [ "$miss" = "0" ] && ok "文档内相对引用全部存在（含嵌图路径）"
 
@@ -166,6 +184,32 @@ if [ "$n_df" = "0" ]; then
   bad "F) 一个 Dockerfile 都没检查到（glob 空匹配＝假通过）；docker/Dockerfile.* 改名或搬家要同步 copy_ctx 映射"
 elif [ "$f_copy" != "0" ]; then bad "F) 有 $f_copy 个 COPY 源不在位"
 else ok "Dockerfile 的 COPY 源在各自构建上下文里全部在位（检查 $n_df 个）"; fi
+
+echo "=== G) 静态分析（shellcheck ＋ node --check）==="
+# 为什么单独一段：A 段的 `bash -n` 只看语法，看不出"用了没定义的变量/死变量/选项位置错"。
+# 0.1.7 v1.1 这轮就漏过一次：node 里引用未声明的 srcId，`node --check` 也过，一跑才炸。
+# 所以这里 ① shellcheck 的 error 级当阻断、warning 级只报计数；② 每个 .cjs 过 node --check；
+# ③ 工具不在位时**明写没扫**，不给假绿（与 B1 那类"glob 空匹配当检查过了"同族）。
+if command -v shellcheck >/dev/null 2>&1; then
+  n_sc=0; n_scerr=0
+  while IFS= read -r f; do
+    n_sc=$((n_sc + 1))
+    out=$(shellcheck -S error -f gcc "$f" 2>&1)
+    if [ -n "$out" ]; then n_scerr=$((n_scerr + 1)); bad "shellcheck error: $out"; fi
+  done < <(find . -type f -name "*.sh" -not -path "./.git/*" | sort)
+  n_warn=$(find . -type f -name "*.sh" -not -path "./.git/*" -exec shellcheck -S warning -f gcc {} \; 2>/dev/null | grep -c warning)
+  [ "$n_scerr" = "0" ] && ok "shellcheck error 级零命中（扫 $n_sc 个 .sh；warning 级另有 $n_warn 条，属可读性，不阻断）"
+  [ "$n_sc" = "0" ] && bad "G) 一个 .sh 都没扫到（find 空匹配＝假通过）"
+else
+  warn_tool="shellcheck 不在 PATH ⇒ 静态分析这一层没跑（对外发布前请在装了它的机器上重跑）"
+  bad "$warn_tool"
+fi
+n_cjs=0
+while IFS= read -r f; do
+  n_cjs=$((n_cjs + 1))
+  node --check "$f" >/dev/null 2>&1 || bad "node --check 失败: $f"
+done < <(find . -type f -name "*.cjs" -not -path "./.git/*" | sort)
+[ "$n_cjs" = "0" ] && bad "G) 一个 .cjs 都没扫到（tools/panel/ 空了？）" || ok ".cjs 文件 $n_cjs 个过 node --check（注意：它查不出未定义变量，那要靠跑）"
 
 echo
 [ "$fail" = "0" ] && { echo "LINT_PASS"; exit 0; } || { echo "LINT_FAIL 上面 FAIL 项必须清零才能对外发"; exit 3; }

@@ -57,7 +57,7 @@ say "=== 0) 前置：物料完整性 ==="
 if [ "$SKIP_NVAPI" = "1" ]; then
   say "  WARN SKIP_NVAPI=1：跳过 NVAPI 前置门。**注意 0.1.7 这条线本来就不把这个库烘进镜像**"
   say "       （它是宿主侧只读 bind，见 docker/NVAPI-获取说明-v1.md），这个开关放行的是构建检查与启动形态："
-  say "       起容器时 run/start-here-v1.sh 要传 NVAPI=none，并把 profile 的 power.mode 改成 sleep，"
+  say "       起容器时 run/start-here-v2.sh 要传 NVAPI=none，并把 profile 的 power.mode 改成 sleep，"
   say "       否则面板会拒绝启引擎。推理本身与这个库无关。"
 else
   [ -f "$NVAPI_FILE" ] || die "缺 docker/libnvidia-api.so.1（或改走 SKIP_NVAPI=1，见 docker/NVAPI-获取说明-v1.md）"
@@ -155,4 +155,4 @@ docker image inspect "$CUR" --format 'IMAGE={{.Id}} SIZE={{.Size}}' | sed 's/^/ 
 echo "BUILD_DONE IMAGE=$CUR"
 say "回填物料的源 wheel：flashinfer_python-0.7.0.post1（sha256 $WHEEL_SHA_070，取件页 $WHEEL_URL_070）"
 [ "$SKIP_NVAPI" = "1" ] && say "注意：本次 SKIP_NVAPI=1 ⇒ 起容器用 NVAPI=none，且 profile 的 power.mode 必须是 sleep。"
-say "下一步：编辑 run/start-here-v1.sh 顶部的路径（或用同名环境变量覆盖），然后 bash run/env-check-v1.sh && bash run/start-here-v1.sh"
+say "下一步：编辑 run/start-here-v2.sh 顶部的路径（或用同名环境变量覆盖），然后 bash run/env-check-v1.sh && bash run/start-here-v2.sh"

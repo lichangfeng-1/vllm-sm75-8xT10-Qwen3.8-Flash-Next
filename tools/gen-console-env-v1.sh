@@ -1,5 +1,5 @@
 #!/bin/bash
-# gen-console-env-v1.sh —— 把在役 console 容器的 env 导出成宿主 env-file（供 run/start-here-v1.sh 的 ENVFILE 用）
+# gen-console-env-v1.sh —— 把在役 console 容器的 env 导出成宿主 env-file（供 run/start-here-v2.sh 的 ENVFILE 用）
 #
 # 为什么要这一步：生产启动脚本不能依赖"去 inspect 某个参照容器"（参照容器哪天被删脚本就废了）。
 # env 落成一个 600 的宿主文件，脚本自给自足。
